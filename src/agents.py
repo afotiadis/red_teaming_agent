@@ -24,3 +24,13 @@ class RedTeamingAgents:
             llm=llm,
             verbose=True
         )
+
+    # 👇 NEW REPORTER AGENT 👇
+    def reporter_agent(self):
+        return Agent(
+            role='Senior Security Auditor',
+            goal='Gather all execution data from the tactical operator and compile it into a professional, boardroom-ready Markdown report.',
+            backstory="You are a veteran Cybersecurity Auditor. You excel at translating raw terminal outputs, failed exploits, and successful hacks into clear, executive-level security reports with actionable remediation steps.",
+            llm=llm,
+            verbose=True
+        )
