@@ -1,0 +1,15 @@
+crewai
+langchain
+langchain-community
+langchain-chroma
+requests
+python-dotenv
+chromadb
+sentence-transformers
+unstructured
+markdown
+beautifulsoup4
+agentic-radar
+chardet
+markdown
+xhtml2pdf
