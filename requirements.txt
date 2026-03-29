@@ -2,6 +2,7 @@ crewai
 langchain
 langchain-community
 langchain-chroma
+langchain-classic
 requests
 python-dotenv
 chromadb
@@ -13,3 +14,6 @@ agentic-radar
 chardet
 markdown
 xhtml2pdf
+fastapi
+uvicorn
+pydantic
