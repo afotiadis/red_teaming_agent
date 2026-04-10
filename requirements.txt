@@ -3,6 +3,7 @@ langchain
 langchain-community
 langchain-chroma
 langchain-classic
+langchain-ollama
 requests
 python-dotenv
 chromadb
