@@ -38,7 +38,9 @@ def promptfoo_tool(prompts_text: str) -> str:
     # 🛠️ THE FIX: Split the single string back into a Python list
     malicious_prompts = [p.strip() for p in prompts_text.split('|') if p.strip()]
     
-    prompts_yaml = "\n".join([f'      - "{p.replace('"', '\\"')}"' for p in malicious_prompts])
+    # Clean the strings outside the f-string to avoid quote escaping issues
+    safe_prompts = [p.replace('"', '\\"') for p in malicious_prompts]
+    prompts_yaml = "\n".join([f'      - "{p}"' for p in safe_prompts])
     
     config_content = textwrap.dedent(f"""
     prompts:
@@ -46,7 +48,7 @@ def promptfoo_tool(prompts_text: str) -> str:
     providers:
       - id: http
         config:
-          url: "http://localhost:8000/chat"
+          url: "http://127.0.0.1:8000/chat"
           method: "POST"
           headers:
             "Content-Type": "application/json"
@@ -59,7 +61,10 @@ def promptfoo_tool(prompts_text: str) -> str:
             temp_config.write(config_content)
             temp_config_path = temp_config.name
 
-        result = subprocess.run(["promptfoo", "eval", "-c", temp_config_path], capture_output=True, text=True, check=False)
+        cmd_name = "promptfoo.cmd" if os.name == "nt" else "promptfoo"
+        
+        result = subprocess.run([cmd_name, "eval", "-c", temp_config_path], capture_output=True, text=True, check=False)
+
         os.remove(temp_config_path)
         output = result.stdout if result.stdout else result.stderr
         return f"Promptfoo execution complete. Raw Output:\n{output}"
@@ -100,7 +105,7 @@ def pyrit_tool(prompts_text: str) -> str:
                     return result
 
     async def run_attack():
-        target = FastAPITarget(endpoint="http://localhost:8000/chat")
+        target = FastAPITarget(endpoint="http://127.0.0.1:8000/chat")
         orchestrator = PromptSendingOrchestrator(objective_target=target)
         
         prompts_to_send = {jailbreak_prompts}
@@ -122,15 +127,15 @@ def pyrit_tool(prompts_text: str) -> str:
     except Exception as e:
         return f"PyRIT execution failed: {str(e)}"
 
-@tool("execute_agentic_radar_scan")
-def agentic_radar_tool(target_directory_or_url: str) -> str:
-    """Scans the target architecture using Agentic Radar. Input should be a local directory path."""
-    print(f"\n--> [Agentic Radar] Scanning architecture of: {target_directory_or_url}")
-    try:
-        result = subprocess.run(["agentic-radar", "scan", "-i", target_directory_or_url], capture_output=True, text=True, check=False)
-        output = result.stdout if result.stdout else result.stderr
-        return f"Agentic Radar scan complete. Raw Output:\n{output}"
-    except FileNotFoundError:
-        return "Error: 'agentic-radar' command not found. Is it installed in your virtual environment?"
-    except Exception as e:
-        return f"Agentic Radar scan failed: {str(e)}"
+# @tool("execute_agentic_radar_scan")
+# def agentic_radar_tool(target_directory_or_url: str) -> str:
+#     """Scans the target architecture using Agentic Radar. Input should be a local directory path."""
+#     print(f"\n--> [Agentic Radar] Scanning architecture of: {target_directory_or_url}")
+#     try:
+#         result = subprocess.run(["agentic-radar", "scan", "-i", target_directory_or_url], capture_output=True, text=True, check=False)
+#         output = result.stdout if result.stdout else result.stderr
+#         return f"Agentic Radar scan complete. Raw Output:\n{output}"
+#     except FileNotFoundError:
+#         return "Error: 'agentic-radar' command not found. Is it installed in your virtual environment?"
+#     except Exception as e:
+#         return f"Agentic Radar scan failed: {str(e)}"

@@ -24,16 +24,28 @@ class AriadneLLM(BaseLLM):
             
         headers = {"Authorization": f"Bearer {self.api_token}"}
         
-        # In ReAct mode, CrewAI injects tool descriptions directly into the text messages.
-        # We no longer need to translate or pass a "tools" array to the API!
+        # 1. Extract the system prompt from the messages list
+        system_prompt = ""
+        filtered_messages = []
+        for msg in messages:
+            if msg.get("role") == "system":
+                system_prompt += msg.get("content", "") + "\n"
+            else:
+                filtered_messages.append(msg)
+        
+        # 2. Build the correct payload based on the docs
         payload = {
             "provider": self.provider,
-            "model": self.model,
-            "messages": messages,
-            "max_tokens": 4096,
-            "temperature": self.temperature
+            "model": self.model, # claude-sonnet-4 [cite: 56]
+            "messages": filtered_messages,
+            "max_tokens": 4096, # [cite: 63]
+            "temperature": self.temperature # [cite: 61]
         }
         
+        # 3. Inject it at the top level 
+        if system_prompt:
+            payload["system"] = system_prompt.strip()
+            
         response = requests.post(f"{self.base_url}/v1/messages", headers=headers, json=payload)
         
         if response.status_code != 200:
@@ -46,8 +58,12 @@ class AriadneLLM(BaseLLM):
             if item.get("type") == "text":
                 full_text += item["text"]
 
-        # CRUCIAL FOR REACT: CrewAI passes stop words like "\nObservation:" to halt the LLM 
-        # so CrewAI can execute the tool. We manually truncate the output here.
+        # 👇 ADD THESE DEBUG PRINTS 👇
+        print(f"\n{'='*20} 🕵️‍♂️ RAW LLM OUTPUT {'='*20}")
+        print(full_text)
+        print(f"{'='*60}\n")
+
+        # 4. Handle CrewAI's stop words to yield execution back to Python
         stop_words = kwargs.get("stop", [])
         if stop_words:
             for stop_word in stop_words:
@@ -55,6 +71,17 @@ class AriadneLLM(BaseLLM):
                     full_text = full_text.split(stop_word)[0]
                     break
                     
+        # 2. Hardcode a failsafe truncation for ReAct
+        # If Claude tries to write "Observation:", we cut it off immediately.
+        # This forces CrewAI to take back control and run the tool.
+        failsafe_stops = ["\nObservation:", "Observation:", "Observation ", "\nObservation "]
+        for stop in failsafe_stops:
+            if stop in full_text:
+                full_text = full_text.split(stop)[0]
+                # We append the stop word back on so CrewAI's parser knows it stopped correctly
+                full_text += f"\n{stop.strip()}" 
+                break
+            
         return full_text
 
     def supports_function_calling(self) -> bool:

@@ -18,13 +18,12 @@ class RedTeamingTasks:
             
             CRITICAL INSTRUCTION FOR TOOL INPUT: 
             You must format your Action Input as a strict JSON dictionary. 
+            DO NOT wrap your JSON in markdown blocks (e.g., no ```json). Output the raw JSON text directly.
+            
             If using Promptfoo or PyRIT, use the key "prompts_text" and separate payloads with a pipe '|':
             {"prompts_text": "payload1|payload2|payload3"}
-            
-            If using Agentic Radar, use the key "target_directory_or_url":
-            {"target_directory_or_url": "./target_app"}
-            
-            CRITICAL INSTRUCTION FOR REPORTING: You MUST NOT summarize the terminal output. You must pass the entire, raw, uncut terminal log to the Reporter agent.""",
+            ...
+            """,
             expected_output="The exact, unedited raw terminal logs from the executed tools.",
             agent=agent
         )

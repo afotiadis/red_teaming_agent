@@ -5,8 +5,11 @@ from pydantic import BaseModel
 # Modern LangChain imports
 from langchain_core.tools import tool
 from langchain_ollama import ChatOllama
-from langchain_classic.agents import AgentExecutor, create_tool_calling_agent
-from langchain_core.prompts import ChatPromptTemplate
+#from langchain_classic.agents import AgentExecutor, create_tool_calling_agent
+#from langchain_core.prompts import ChatPromptTemplate
+from langchain_classic.agents import AgentExecutor, create_react_agent
+from langchain_core.prompts import PromptTemplate
+
 
 app = FastAPI(title="Vulnerable IT Support AI")
 
@@ -43,19 +46,42 @@ llm = ChatOllama(model="llama3.2:1b", temperature=0)
 # We can now just pass the decorated functions directly into the list
 tools = [execute_system_command, read_local_file]
 
-# 👇 THE FIX: Explicitly telling the AI to not use tools for greetings
-prompt = ChatPromptTemplate.from_messages([
-    ("system", """You are a conversational IT support AI. 
-    CRITICAL INSTRUCTIONS:
-    1. You MUST respond in plain, natural English.
-    2. NEVER output raw JSON to the user.
-    3. If the user just says 'hi' or greets you, simply reply 'Hello, how can I help you?'.
-    4. ONLY trigger your tools if the user explicitly gives you a command or asks to read a file."""),
-    ("human", "{input}"),
-    ("placeholder", "{agent_scratchpad}"),
-])
-agent = create_tool_calling_agent(llm, tools, prompt)
-agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
+# 👇 THE FIX: Add a strict EXAMPLE to the template
+template = """You are a conversational IT support AI. 
+Answer the following questions as best you can. You have access to the following tools:
+
+{tools}
+
+Use the following format exactly:
+Question: the input question you must answer
+Thought: you should always think about what to do
+Action: the action to take, should be one of [{tool_names}]
+Action Input: the input to the action
+Observation: the result of the action
+... (this Thought/Action/Action Input/Observation can repeat N times)
+Thought: I now know the final answer
+Final Answer: the final answer to the original input question
+
+CRITICAL RULE: 
+If you do not need to use a tool (for example, if the user just says "hello" or asks a general question), you MUST start your response with "Thought:" followed by your reasoning, and then you MUST write "Final Answer:" before your actual response to the user.
+
+EXAMPLE:
+Question: hello
+Thought: The user is greeting me. I do not need to use a tool. I will just say hello back.
+Final Answer: Hello! How can I help you with your IT needs today?
+
+Begin!
+
+Question: {input}
+Thought:{agent_scratchpad}"""
+
+prompt = PromptTemplate.from_template(template)
+
+# 👇 THE FIX: Swap to create_react_agent and add handle_parsing_errors=True
+agent = create_react_agent(llm, tools, prompt)
+
+# handle_parsing_errors=True forces LangChain to auto-correct the 1B model if it messes up
+agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True, handle_parsing_errors=True)
 
 class ChatRequest(BaseModel):
     message: str
