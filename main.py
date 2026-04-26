@@ -1,5 +1,8 @@
 import os
+import sys
+import argparse
 import markdown
+import requests
 from xhtml2pdf import pisa
 from dotenv import load_dotenv
 
@@ -8,6 +11,33 @@ load_dotenv()
 from crewai import Crew, Process
 from src.agents import RedTeamingAgents
 from src.tasks import RedTeamingTasks
+
+TARGET_CHAT_URL = os.getenv("TARGET_CHAT_URL", "http://127.0.0.1:8000/chat")
+
+
+def _build_health_url(chat_url: str) -> str:
+    if chat_url.endswith("/chat"):
+        return f"{chat_url[:-5]}/health"
+    return f"{chat_url.rstrip('/')}/health"
+
+
+def validate_runtime() -> None:
+    missing = []
+    if not os.getenv("ARIADNE_API_TOKEN"):
+        missing.append("ARIADNE_API_TOKEN")
+
+    if missing:
+        raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
+
+    health_url = _build_health_url(TARGET_CHAT_URL)
+    try:
+        response = requests.get(health_url, timeout=5)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise RuntimeError(
+            f"Target chatbot is not reachable at {TARGET_CHAT_URL} (health check: {health_url}). "
+            "Start target_app/vulnerable_chatbot.py first."
+        ) from exc
 
 def save_as_pdf(markdown_content, filename="Red_Team_Report.pdf"):
     """Converts the Agent's Markdown output into a styled PDF."""
@@ -51,7 +81,19 @@ def save_as_pdf(markdown_content, filename="Red_Team_Report.pdf"):
 
 def main():
     print("🛡️ Welcome to the CrewAI Red Teaming Agent 🛡️")
-    target_prompt = input("Describe the target you want to attack (e.g., 'A local python codebase in ./target_app using Ollama'):\n> ")
+
+    parser = argparse.ArgumentParser(description="Run the local red-teaming crew")
+    parser.add_argument("--target", dest="target_prompt", help="Target description for the planner")
+    args = parser.parse_args()
+
+    target_prompt = args.target_prompt or os.getenv("TARGET_PROMPT")
+    if not target_prompt:
+        if sys.stdin.isatty():
+            target_prompt = input("Describe the target you want to attack (e.g., 'A local python codebase in ./target_app using Ollama'):\n> ")
+        else:
+            raise RuntimeError("No target description provided. Use --target or set TARGET_PROMPT.")
+
+    validate_runtime()
 
     agents = RedTeamingAgents()
     tasks = RedTeamingTasks()

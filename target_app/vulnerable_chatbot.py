@@ -1,4 +1,5 @@
 import subprocess
+import os
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
@@ -41,7 +42,7 @@ def read_local_file(filepath: str) -> str:
 
 print("🤖 Booting up Ollama and LangChain (Native Tool Calling)...")
 
-llm = ChatOllama(model="llama3.2:1b", temperature=0)
+llm = ChatOllama(model=os.getenv("OLLAMA_MODEL", "llama3.2:1b"), temperature=0)
 
 # We can now just pass the decorated functions directly into the list
 tools = [execute_system_command, read_local_file]
@@ -86,6 +87,12 @@ agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True, handle_pa
 class ChatRequest(BaseModel):
     message: str
 
+
+@app.get("/health")
+def health_endpoint():
+    return {"status": "ok"}
+
+
 @app.post("/chat")
 def chat_endpoint(request: ChatRequest):
     print(f"\n\n{'='*50}")
@@ -102,4 +109,8 @@ def chat_endpoint(request: ChatRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(
+        app,
+        host=os.getenv("TARGET_HOST", "0.0.0.0"),
+        port=int(os.getenv("TARGET_PORT", "8000"))
+    )

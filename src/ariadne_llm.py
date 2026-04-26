@@ -18,6 +18,9 @@ class AriadneLLM(BaseLLM):
         callbacks: Optional[List[Any]] = None,
         **kwargs: Any,
     ) -> str:
+
+        if not self.api_token:
+            raise RuntimeError("ARIADNE_API_TOKEN is not set. Export it before running the crew.")
         
         if isinstance(messages, str):
             messages = [{"role": "user", "content": messages}]
@@ -46,7 +49,7 @@ class AriadneLLM(BaseLLM):
         if system_prompt:
             payload["system"] = system_prompt.strip()
             
-        response = requests.post(f"{self.base_url}/v1/messages", headers=headers, json=payload)
+        response = requests.post(f"{self.base_url}/v1/messages", headers=headers, json=payload, timeout=120)
         
         if response.status_code != 200:
             raise Exception(f"[ARIADNE_WRAPPER_ERROR] {response.status_code}: {response.text}")

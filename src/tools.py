@@ -1,4 +1,7 @@
 import os
+import sys
+import json
+import shutil
 import subprocess
 import tempfile
 import textwrap
@@ -6,7 +9,41 @@ from crewai.tools import tool
 from langchain_chroma import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
 
-# --- RAG Setup ---
+TARGET_CHAT_URL = os.getenv("TARGET_CHAT_URL", "http://127.0.0.1:8000/chat")
+
+
+def _build_promptfoo_command(config_path: str) -> list[str]:
+    """Resolves a working Promptfoo invocation on each platform."""
+    if os.name != "nt":
+        binary = shutil.which("promptfoo")
+        if not binary:
+            raise FileNotFoundError("promptfoo is not installed or not in PATH.")
+        return [binary, "eval", "-c", config_path]
+
+    cmd_binary = shutil.which("promptfoo.cmd")
+    if cmd_binary:
+        return [cmd_binary, "eval", "-c", config_path]
+
+    ps1_binary = shutil.which("promptfoo.ps1")
+    if ps1_binary:
+        return [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            ps1_binary,
+            "eval",
+            "-c",
+            config_path,
+        ]
+
+    raise FileNotFoundError(
+        "Promptfoo launcher not found. Install promptfoo and ensure promptfoo.cmd or promptfoo.ps1 is on PATH."
+    )
+
+
+# --- RAG Setup (Restored!) ---
 if os.path.exists("chroma_db"):
     embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
     vector_store = Chroma(persist_directory="chroma_db", embedding_function=embeddings)
@@ -16,55 +53,46 @@ else:
 
 @tool("query_red_teaming_tools_knowledge")
 def tool_knowledge_rag(query: str) -> str:
-    """Queries the RAG database to find documentation on Promptfoo, PyRIT, or Agentic Radar."""
+    """Queries the RAG database to find documentation on Promptfoo or PyRIT."""
     if not retriever: return "Error: Chroma DB not found. Please run ingest_knowledge.py first."
     results = retriever.invoke(query)
     if not results: return "No relevant information found in the documentation."
     return "\n\n".join([f"Source: {doc.metadata.get('source', 'Unknown')}\nContent: {doc.page_content}" for doc in results])
 
-# --- Execution Tools ---
-
-# ... (RAG setup and agentic_radar_tool remain the same) ...
+# --- Execution Tools (With Windows/UTF-8 Fixes) ---
 
 @tool("execute_promptfoo_attack")
 def promptfoo_tool(prompts_text: str) -> str:
-    """
-    Executes an attack using Promptfoo against the FastAPI Agent endpoint.
-    Args:
-        prompts_text (str): A single string containing malicious prompts separated by a pipe character '|'.
-    """
+    """Executes an attack using Promptfoo against the FastAPI Agent endpoint."""
     print(f"\n--> [Promptfoo] Attacking FastAPI Agent with dynamic payloads...")
     
-    # 🛠️ THE FIX: Split the single string back into a Python list
     malicious_prompts = [p.strip() for p in prompts_text.split('|') if p.strip()]
     
-    # Clean the strings outside the f-string to avoid quote escaping issues
-    safe_prompts = [p.replace('"', '\\"') for p in malicious_prompts]
-    prompts_yaml = "\n".join([f'      - "{p}"' for p in safe_prompts])
-    
-    config_content = textwrap.dedent(f"""
-    prompts:
-{prompts_yaml}
-    providers:
-      - id: http
-        config:
-          url: "http://127.0.0.1:8000/chat"
-          method: "POST"
-          headers:
-            "Content-Type": "application/json"
-          body:
-            message: "{{{{prompt}}}}"
-    """)
+    # Use a strict JSON dictionary instead of fragile YAML formatting
+    config_data = {
+        "prompts": malicious_prompts,
+        "providers": [{
+            "id": "http",
+            "config": {
+                "url": TARGET_CHAT_URL,
+                "method": "POST",
+                "headers": {"Content-Type": "application/json"},
+                "body": {"message": "{{prompt}}"}
+            }
+        }]
+    }
     
     try:
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as temp_config:
-            temp_config.write(config_content)
+        # Save as a .json file, forcing utf-8
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding='utf-8') as temp_config:
+            json.dump(config_data, temp_config)
             temp_config_path = temp_config.name
 
-        cmd_name = "promptfoo.cmd" if os.name == "nt" else "promptfoo"
-        
-        result = subprocess.run([cmd_name, "eval", "-c", temp_config_path], capture_output=True, text=True, check=False)
+        command = _build_promptfoo_command(temp_config_path)
 
+        # Add encoding='utf-8' to prevent the Greek cp1253 crash
+        result = subprocess.run(command, capture_output=True, text=True, check=False, encoding='utf-8')
+        
         os.remove(temp_config_path)
         output = result.stdout if result.stdout else result.stderr
         return f"Promptfoo execution complete. Raw Output:\n{output}"
@@ -73,14 +101,9 @@ def promptfoo_tool(prompts_text: str) -> str:
 
 @tool("execute_pyrit_attack")
 def pyrit_tool(prompts_text: str) -> str:
-    """
-    Executes an attack using PyRIT against the FastAPI Agent endpoint.
-    Args:
-        prompts_text (str): A single string containing jailbreak prompts separated by a pipe character '|'.
-    """
+    """Executes an attack using PyRIT against the FastAPI Agent endpoint."""
     print(f"\n--> [PyRIT] Attacking FastAPI Agent with dynamic payloads...")
     
-    # 🛠️ THE FIX: Split the single string back into a Python list
     jailbreak_prompts = [p.strip() for p in prompts_text.split('|') if p.strip()]
     
     script_content = textwrap.dedent(f"""
@@ -115,12 +138,16 @@ def pyrit_tool(prompts_text: str) -> str:
     if __name__ == "__main__":
         asyncio.run(run_attack())
     """)
+    
     try:
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as temp_script:
+        # Force utf-8 on script creation
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as temp_script:
             temp_script.write(script_content)
             temp_script_path = temp_script.name
         
-        result = subprocess.run(["python", temp_script_path], capture_output=True, text=True, check=False)
+        # Use sys.executable to stay inside the venv, and add utf-8 encoding
+        result = subprocess.run([sys.executable, temp_script_path], capture_output=True, text=True, check=False, encoding='utf-8')
+        
         os.remove(temp_script_path)
         output = result.stdout if result.stdout else result.stderr
         return f"PyRIT execution complete. Raw Output:\n{output}"
