@@ -88,6 +88,14 @@ class ChatRequest(BaseModel):
     message: str
 
 
+@app.get("/")
+def root_endpoint():
+    return {"message": "Vulnerable IT Support AI is running", "endpoints": {
+        "health": "GET /health",
+        "chat": "POST /chat"
+    }}
+
+
 @app.get("/health")
 def health_endpoint():
     return {"status": "ok"}
