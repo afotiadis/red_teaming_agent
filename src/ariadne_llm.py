@@ -6,7 +6,7 @@ from crewai import BaseLLM
 class AriadneLLM(BaseLLM):
     """Native Custom LLM wrapper using ReAct prompting for CrewAI."""
     
-    def __init__(self, model: str = "claude-sonnet-4-6", temperature: Optional[float] = 0.7, **kwargs):
+    def __init__(self, model: str = "claude-sonnet-4", temperature: Optional[float] = 0.7, **kwargs):
         super().__init__(model=model, temperature=temperature, **kwargs)
         self.api_token = os.getenv("ARIADNE_API_TOKEN", "")
         self.base_url = "https://ariadne.issel.ee.auth.gr/api"
@@ -39,7 +39,7 @@ class AriadneLLM(BaseLLM):
         # 2. Build the correct payload based on the docs
         payload = {
             "provider": self.provider,
-            "model": self.model, # claude-sonnet-4-6 [cite: 56]
+            "model": self.model, # claude-sonnet-4 [cite: 56]
             "messages": filtered_messages,
             "max_tokens": 4096, # [cite: 63]
             "temperature": self.temperature # [cite: 61]

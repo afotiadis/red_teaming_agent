@@ -44,6 +44,9 @@ print("🤖 Booting up Ollama and LangChain (Native Tool Calling)...")
 
 llm = ChatOllama(model=os.getenv("OLLAMA_MODEL", "llama3.2:1b"), temperature=0)
 
+MAX_AGENT_ITERATIONS = int(os.getenv("MAX_AGENT_ITERATIONS", "4"))
+MAX_AGENT_EXECUTION_TIME = int(os.getenv("MAX_AGENT_EXECUTION_TIME", "20"))
+
 # We can now just pass the decorated functions directly into the list
 tools = [execute_system_command, read_local_file]
 
@@ -81,8 +84,18 @@ prompt = PromptTemplate.from_template(template)
 # 👇 THE FIX: Swap to create_react_agent and add handle_parsing_errors=True
 agent = create_react_agent(llm, tools, prompt)
 
-# handle_parsing_errors=True forces LangChain to auto-correct the 1B model if it messes up
-agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True, handle_parsing_errors=True)
+# Bound execution so malformed ReAct output cannot loop forever.
+agent_executor = AgentExecutor(
+    agent=agent,
+    tools=tools,
+    verbose=True,
+    handle_parsing_errors=(
+        "Parsing error: follow the format exactly with Thought/Action/Action Input/Observation or Final Answer."
+    ),
+    max_iterations=MAX_AGENT_ITERATIONS,
+    max_execution_time=MAX_AGENT_EXECUTION_TIME,
+    early_stopping_method="generate",
+)
 
 class ChatRequest(BaseModel):
     message: str
@@ -112,8 +125,27 @@ def chat_endpoint(request: ChatRequest):
         print(f"🛡️ Agent Reply: {response['output']}")
         return {"response": response['output']}
     except Exception as e:
-        print(f"❌ Server Error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        error_text = str(e)
+        print(f"❌ Server Error: {error_text}")
+
+        if "Agent stopped due to iteration limit" in error_text or "iteration limit" in error_text.lower():
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Agent output loop detected and stopped by max iteration guardrail. "
+                    "Try a simpler prompt or use a stronger model."
+                ),
+            )
+
+        if "timed out" in error_text.lower() or "time limit" in error_text.lower():
+            raise HTTPException(
+                status_code=504,
+                detail=(
+                    "Agent execution exceeded time limit and was stopped by guardrail."
+                ),
+            )
+
+        raise HTTPException(status_code=500, detail=error_text)
 
 if __name__ == "__main__":
     import uvicorn
