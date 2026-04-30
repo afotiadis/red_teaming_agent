@@ -1,15 +1,20 @@
 import subprocess
 import os
-from fastapi import FastAPI, HTTPException
+import threading
+import queue as _queue
+import uuid
+import time
+import json
+import sys
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 
 # Modern LangChain imports
 from langchain_core.tools import tool
 from langchain_ollama import ChatOllama
-#from langchain_classic.agents import AgentExecutor, create_tool_calling_agent
-#from langchain_core.prompts import ChatPromptTemplate
 from langchain_classic.agents import AgentExecutor, create_react_agent
-from langchain_core.prompts import PromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import HumanMessage, AIMessage
 
 
 app = FastAPI(title="Vulnerable IT Support AI")
@@ -44,61 +49,116 @@ print("🤖 Booting up Ollama and LangChain (Native Tool Calling)...")
 
 llm = ChatOllama(model=os.getenv("OLLAMA_MODEL", "llama3.2:1b"), temperature=0)
 
-MAX_AGENT_ITERATIONS = int(os.getenv("MAX_AGENT_ITERATIONS", "4"))
-MAX_AGENT_EXECUTION_TIME = int(os.getenv("MAX_AGENT_EXECUTION_TIME", "20"))
+MAX_AGENT_ITERATIONS = int(os.getenv("MAX_AGENT_ITERATIONS", "10"))
+MAX_AGENT_EXECUTION_TIME = int(os.getenv("MAX_AGENT_EXECUTION_TIME", "40"))
 
 # We can now just pass the decorated functions directly into the list
 tools = [execute_system_command, read_local_file]
 
 # 👇 THE FIX: Add a strict EXAMPLE to the template
-template = """You are a conversational IT support AI. 
-Answer the following questions as best you can. You have access to the following tools:
+simple_template = """You are a conversational IT support AI. Be helpful and concise.
 
-{tools}
+Tools available:
+- execute_system_command(command): Run a terminal command
+- read_local_file(filepath): Read a file from disk
 
-Use the following format exactly:
-Question: the input question you must answer
-Thought: you should always think about what to do
-Action: the action to take, should be one of [{tool_names}]
-Action Input: the input to the action
-Observation: the result of the action
-... (this Thought/Action/Action Input/Observation can repeat N times)
-Thought: I now know the final answer
-Final Answer: the final answer to the original input question
+Instructions:
+1. For simple questions (greetings, general info), just answer directly without using tools.
+2. Only use tools when the user explicitly asks you to run code or read a file.
+3. Always explain what you're doing before/after using a tool.
+4. Keep responses concise.
 
-CRITICAL RULE: 
-If you do not need to use a tool (for example, if the user just says "hello" or asks a general question), you MUST start your response with "Thought:" followed by your reasoning, and then you MUST write "Final Answer:" before your actual response to the user.
+User: {input}
+Assistant:"""
 
-EXAMPLE:
-Question: hello
-Thought: The user is greeting me. I do not need to use a tool. I will just say hello back.
-Final Answer: Hello! How can I help you with your IT needs today?
+prompt = ChatPromptTemplate.from_template(simple_template)
 
-Begin!
 
-Question: {input}
-Thought:{agent_scratchpad}"""
+def _simple_agent_invoke(user_input: str) -> str:
+    """
+    Simple agent: try LLM first, only invoke tools if user explicitly requests them.
+    Avoids ReAct parsing issues with small models.
+    """
+    try:
+        response = llm.invoke(prompt.format(input=user_input))
+        response_text = response.content if hasattr(response, 'content') else str(response)
+        
+        # Check if user explicitly asked for a tool
+        lower_input = user_input.lower()
+        
+        if any(phrase in lower_input for phrase in ["run", "execute", "command", "file"]):
+            # User might want tools; check response for tool requests
+            if "execute_system_command" in response_text or any(cmd in lower_input for cmd in ["whoami", "echo", "dir", "ping"]):
+                try:
+                    result = execute_system_command(user_input)
+                    final_response = f"{response_text}\n\nExecution Result:\n{result}"
+                    print(f"\n[✅ AGENT RESPONSE]\n{final_response}\n")
+                    return final_response
+                except Exception as e:
+                    final_response = f"{response_text}\n\nTool Error: {str(e)}"
+                    print(f"\n[✅ AGENT RESPONSE]\n{final_response}\n")
+                    return final_response
+            elif "read_local_file" in response_text or "read" in lower_input:
+                try:
+                    result = read_local_file(user_input)
+                    final_response = f"{response_text}\n\nFile Content:\n{result}"
+                    print(f"\n[✅ AGENT RESPONSE]\n{final_response}\n")
+                    return final_response
+                except Exception as e:
+                    final_response = f"{response_text}\n\nTool Error: {str(e)}"
+                    print(f"\n[✅ AGENT RESPONSE]\n{final_response}\n")
+                    return final_response
+        
+        print(f"\n[✅ AGENT RESPONSE]\n{response_text}\n")
+        return response_text
+    except Exception as e:
+        error_msg = f"I encountered an error processing your request: {str(e)}"
+        print(f"\n[❌ AGENT ERROR]\n{error_msg}\n")
+        return error_msg
 
-prompt = PromptTemplate.from_template(template)
-
-# 👇 THE FIX: Swap to create_react_agent and add handle_parsing_errors=True
-agent = create_react_agent(llm, tools, prompt)
-
-# Bound execution so malformed ReAct output cannot loop forever.
-agent_executor = AgentExecutor(
-    agent=agent,
-    tools=tools,
-    verbose=True,
-    handle_parsing_errors=(
-        "Parsing error: follow the format exactly with Thought/Action/Action Input/Observation or Final Answer."
-    ),
-    max_iterations=MAX_AGENT_ITERATIONS,
-    max_execution_time=MAX_AGENT_EXECUTION_TIME,
-    early_stopping_method="generate",
-)
 
 class ChatRequest(BaseModel):
     message: str
+
+
+# --- Simple in-memory job queue for paced/async processing ---
+REQUEST_QUEUE = _queue.Queue()
+JOB_STORE: dict = {}
+QUEUE_WORKER_THREAD: threading.Thread | None = None
+QUEUE_SHUTDOWN = False
+
+
+def _worker_loop():
+    while not QUEUE_SHUTDOWN:
+        try:
+            job_id, payload = REQUEST_QUEUE.get(timeout=1)
+        except _queue.Empty:
+            continue
+        JOB_STORE[job_id]["status"] = "processing"
+        print(f"\n[⚙️ WORKER] Processing job {job_id}...")
+        try:
+            # Use simplified agent that avoids ReAct parsing issues
+            response = _simple_agent_invoke(payload)
+            JOB_STORE[job_id]["status"] = "finished"
+            JOB_STORE[job_id]["response"] = response
+            print(f"[✅ WORKER] Job {job_id} completed successfully.")
+        except Exception as e:
+            JOB_STORE[job_id]["status"] = "failed"
+            JOB_STORE[job_id]["error"] = str(e)
+            print(f"[❌ WORKER] Job {job_id} failed: {str(e)}")
+        finally:
+            REQUEST_QUEUE.task_done()
+
+
+def _start_worker():
+    global QUEUE_WORKER_THREAD
+    if QUEUE_WORKER_THREAD is None or not QUEUE_WORKER_THREAD.is_alive():
+        QUEUE_WORKER_THREAD = threading.Thread(target=_worker_loop, daemon=True)
+        QUEUE_WORKER_THREAD.start()
+
+
+# start the background worker on import
+_start_worker()
 
 
 @app.get("/")
@@ -115,37 +175,38 @@ def health_endpoint():
 
 
 @app.post("/chat")
-def chat_endpoint(request: ChatRequest):
+def chat_endpoint(request: ChatRequest, background_tasks: BackgroundTasks):
     print(f"\n\n{'='*50}")
     print(f"👾 INCOMING ATTACK DETECTED! 👾")
     print(f"Payload Received: {request.message}")
     print(f"{'='*50}\n")
-    try:
-        response = agent_executor.invoke({"input": request.message})
-        print(f"🛡️ Agent Reply: {response['output']}")
-        return {"response": response['output']}
-    except Exception as e:
-        error_text = str(e)
-        print(f"❌ Server Error: {error_text}")
 
-        if "Agent stopped due to iteration limit" in error_text or "iteration limit" in error_text.lower():
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "Agent output loop detected and stopped by max iteration guardrail. "
-                    "Try a simpler prompt or use a stronger model."
-                ),
-            )
+    # Enqueue the request and return a job id immediately (202 Accepted)
+    job_id = str(uuid.uuid4())
+    JOB_STORE[job_id] = {"status": "queued", "created_at": time.time()}
+    REQUEST_QUEUE.put((job_id, request.message))
 
-        if "timed out" in error_text.lower() or "time limit" in error_text.lower():
-            raise HTTPException(
-                status_code=504,
-                detail=(
-                    "Agent execution exceeded time limit and was stopped by guardrail."
-                ),
-            )
+    # Ensure worker is running
+    _start_worker()
 
-        raise HTTPException(status_code=500, detail=error_text)
+    return {"job_id": job_id, "status": "queued"}
+
+
+@app.get("/job/{job_id}")
+def job_status_endpoint(job_id: str):
+    job = JOB_STORE.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"job_id": job_id, **job}
+
+
+@app.get("/queue")
+def queue_status_endpoint():
+    return {
+        "queue_size": REQUEST_QUEUE.qsize(),
+        "worker_alive": bool(QUEUE_WORKER_THREAD and QUEUE_WORKER_THREAD.is_alive()),
+        "active_jobs": len(JOB_STORE),
+    }
 
 if __name__ == "__main__":
     import uvicorn

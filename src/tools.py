@@ -5,12 +5,18 @@ import shutil
 import subprocess
 import tempfile
 import textwrap
+import time
 import requests
 from crewai.tools import tool
 from langchain_chroma import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
 
 TARGET_CHAT_URL = os.getenv("TARGET_CHAT_URL", "http://127.0.0.1:8000/chat")
+
+
+def _build_job_url(chat_url: str, job_id: str) -> str:
+    base_url = chat_url[:-5] if chat_url.endswith("/chat") else chat_url.rstrip("/")
+    return f"{base_url}/job/{job_id}"
 
 
 def _build_health_url(chat_url: str) -> str:
@@ -87,6 +93,52 @@ def promptfoo_tool(prompts_text: str) -> str:
             "Promptfoo execution aborted: target health preflight failed. "
             f"chat_url={TARGET_CHAT_URL}, health_url={health_url}, error={str(e)}"
         )
+
+    # Use direct sequential POSTs with pacing by default. Set USE_PROMPTFOO=1 to run the external promptfoo tool instead.
+    use_promptfoo = os.getenv("USE_PROMPTFOO", "0") == "1"
+
+    if not use_promptfoo:
+        delay = float(os.getenv("INTER_PROMPT_DELAY", "0.5"))
+        per_request_timeout = int(os.getenv("ATTACK_REQUEST_TIMEOUT", "15"))
+        poll_interval = float(os.getenv("ATTACK_JOB_POLL_INTERVAL", "0.5"))
+        job_timeout = int(os.getenv("ATTACK_JOB_TIMEOUT", "120"))
+
+        print(f"--> [Promptfoo-Mode] Posting {len(malicious_prompts)} prompts sequentially with {delay}s delay to {TARGET_CHAT_URL}")
+        results = []
+        for idx, p in enumerate(malicious_prompts, start=1):
+            try:
+                payload = {"message": p}
+                r = requests.post(TARGET_CHAT_URL, json=payload, timeout=per_request_timeout)
+                response_body = r.json()
+                job_id = response_body.get("job_id")
+                job_data = response_body
+
+                if job_id:
+                    job_url = _build_job_url(TARGET_CHAT_URL, job_id)
+                    started_at = time.time()
+                    while time.time() - started_at < job_timeout:
+                        status_response = requests.get(job_url, timeout=per_request_timeout)
+                        job_data = status_response.json()
+                        if job_data.get("status") in {"finished", "failed"}:
+                            break
+                        time.sleep(poll_interval)
+
+                entry = {
+                    "prompt_index": idx,
+                    "prompt": p,
+                    "status_code": r.status_code,
+                    "response": job_data,
+                }
+                print(f"--> [Promptfoo-Mode] Sent prompt {idx}/{len(malicious_prompts)}: status={r.status_code}")
+                results.append(entry)
+            except requests.RequestException as e:
+                results.append({"prompt_index": idx, "prompt": p, "error": str(e)})
+                print(f"--> [Promptfoo-Mode] Error sending prompt {idx}: {str(e)}")
+            # Throttle
+            if idx < len(malicious_prompts):
+                time.sleep(delay)
+
+        return json.dumps({"target": TARGET_CHAT_URL, "results": results}, ensure_ascii=False, indent=2)
 
     # Build explicit test cases so each malicious prompt is guaranteed to be sent.
     config_data = {

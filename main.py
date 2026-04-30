@@ -46,21 +46,24 @@ def save_as_pdf(markdown_content, filename="Red_Team_Report.pdf"):
     # Convert Markdown to HTML
     html_body = markdown.markdown(markdown_content, extensions=['tables', 'fenced_code'])
     
-    # Add CSS styling to make it look professional
+    # Add CSS styling to make it look professional and handle text wrapping
     html_content = f"""
     <html>
     <head>
     <style>
-        @page {{ size: A4; margin: 2cm; }}
-        body {{ font-family: Helvetica, Arial, sans-serif; line-height: 1.5; color: #333; }}
-        h1 {{ color: #2c3e50; border-bottom: 2px solid #e74c3c; padding-bottom: 5px; }}
-        h2 {{ color: #e74c3c; margin-top: 20px; }}
-        h3 {{ color: #34495e; }}
-        table {{ width: 100%; border-collapse: collapse; margin-bottom: 20px; }}
-        th, td {{ border: 1px solid #bdc3c7; padding: 10px; text-align: left; }}
-        th {{ background-color: #ecf0f1; color: #2c3e50; }}
-        pre {{ background-color: #f8f9fa; padding: 15px; border: 1px solid #e9ecef; border-radius: 5px; font-size: 12px; }}
-        code {{ font-family: "Courier New", Courier, monospace; color: #c0392b; }}
+        @page {{ size: A4; margin: 1.5cm; }}
+        body {{ font-family: Helvetica, Arial, sans-serif; line-height: 1.6; color: #333; font-size: 10pt; }}
+        h1 {{ color: #2c3e50; border-bottom: 2px solid #e74c3c; padding-bottom: 5px; font-size: 18pt; margin: 15px 0 10px 0; }}
+        h2 {{ color: #e74c3c; margin-top: 15px; margin-bottom: 10px; font-size: 14pt; }}
+        h3 {{ color: #34495e; margin-top: 10px; margin-bottom: 8px; font-size: 12pt; }}
+        p {{ margin: 5px 0; word-wrap: break-word; overflow-wrap: break-word; }}
+        table {{ width: 100%; border-collapse: collapse; margin: 15px 0; font-size: 9pt; }}
+        th, td {{ border: 1px solid #bdc3c7; padding: 8px; text-align: left; word-wrap: break-word; overflow-wrap: break-word; }}
+        th {{ background-color: #ecf0f1; color: #2c3e50; font-weight: bold; }}
+        pre {{ background-color: #f8f9fa; padding: 12px; border: 1px solid #e9ecef; border-radius: 4px; font-size: 8pt; overflow-x: auto; word-wrap: break-word; overflow-wrap: break-word; white-space: pre-wrap; margin: 10px 0; }}
+        code {{ font-family: "Courier New", Courier, monospace; color: #c0392b; word-wrap: break-word; overflow-wrap: break-word; }}
+        ul, ol {{ margin: 8px 0; padding-left: 20px; }}
+        li {{ margin: 4px 0; }}
     </style>
     </head>
     <body>
