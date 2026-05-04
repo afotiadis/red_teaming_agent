@@ -1,7 +1,25 @@
+"""Task definitions for the red-teaming crew.
+
+The tasks are the contract between the three agents. Each one describes what
+the current role should do and, just as importantly, what the next role expects
+to receive.
+
+The planner must return structured JSON, the executor must return raw logs, and
+the reporter must turn those logs into a polished Markdown report.
+"""
+
 from crewai import Task
 
 class RedTeamingTasks:
+    """Factory for the sequential tasks that drive the crew."""
+
     def plan_attack(self, agent, target_prompt):
+        """Ask the planner to turn the target description into structured JSON.
+
+        The output shape is intentionally strict so the executor can parse it
+        mechanically. The task instructs the model to keep the plan concise and
+        to place the prompts in a single pipe-delimited string.
+        """
         return Task(
             description=f"""Target: {target_prompt}
             1. Use the 'query_red_teaming_tools_knowledge' tool to confirm the best testing approach for this target.
@@ -15,6 +33,12 @@ class RedTeamingTasks:
         )
 
     def execute_and_report(self, agent):
+        """Ask the executor to run the approved tool once and return the raw log.
+
+        This stage is intentionally boring. It should not paraphrase or summarize
+        the result because the reporter stage needs the untouched execution trace
+        as evidence.
+        """
         return Task(
             description="""Read the planner JSON and call the named tool exactly once.
 
@@ -27,6 +51,12 @@ class RedTeamingTasks:
         )
 
     def generate_pdf_report(self, agent):
+        """Ask the reporter to turn execution logs into a polished Markdown report.
+
+        The expected report structure keeps the final document consistent:
+        executive summary, target details, attack methodology, transcripts, and
+        remediation recommendations.
+        """
         return Task(
             description="""Review the raw execution logs from the Executor agent. Format this data into a highly professional Markdown report. 
             

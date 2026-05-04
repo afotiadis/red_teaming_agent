@@ -1,3 +1,16 @@
+"""CrewAI agent definitions used by the red-teaming pipeline.
+
+The project uses three specialized roles rather than a single generic agent.
+That separation keeps the behavior understandable:
+
+* the planner studies the target and proposes a test plan,
+* the executor performs the attack step exactly as instructed, and
+* the reporter turns the raw execution output into a readable document.
+
+Keeping the agents separate makes the control flow easier to explain, debug,
+and extend.
+"""
+
 from crewai import Agent
 from src.tools import tool_knowledge_rag, promptfoo_tool
 from src.ariadne_llm import AriadneLLM
@@ -5,7 +18,15 @@ from src.ariadne_llm import AriadneLLM
 llm = AriadneLLM()
 
 class RedTeamingAgents:
+    """Factory for the three roles used by the sequential CrewAI flow."""
+
     def planner_agent(self):
+        """Build the strategist that turns a target description into an attack plan.
+
+        This agent is expected to read the target description, consult the RAG
+        knowledge base through ``tool_knowledge_rag``, and return a structured
+        JSON plan naming the tool to run and the prompts to test.
+        """
         return Agent(
             role='Red Teaming Strategist',
             goal='Analyze the target description, consult the RAG knowledge base, and formulate a JSON attack plan for Promptfoo.',
@@ -16,6 +37,12 @@ class RedTeamingAgents:
         )
 
     def executor_agent(self):
+        """Build the operator that executes the planner's chosen tool.
+
+        The executor should not invent a new strategy. Its job is to consume the
+        JSON produced by the strategist, call the named tool exactly as provided,
+        and preserve the raw output for the reporting stage.
+        """
         return Agent(
             role='Red Team Attack Executor',
             goal='Take the attack plan, execute the appropriate tools, and gather feedback.',
@@ -31,8 +58,13 @@ class RedTeamingAgents:
             verbose=True
         )
 
-    # 👇 NEW REPORTER AGENT 👇
     def reporter_agent(self):
+        """Build the auditor that turns raw output into a readable report.
+
+        The reporter receives the execution trace and converts it into a
+        Markdown document that can be reviewed by a human without needing to
+        inspect the raw terminal log directly.
+        """
         return Agent(
             role='Senior Security Auditor',
             goal='Gather all execution data from the tactical operator and compile it into a professional, boardroom-ready Markdown report.',

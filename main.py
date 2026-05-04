@@ -1,3 +1,13 @@
+"""Command-line entry point for the local red-teaming workflow.
+
+The project is intentionally staged as a simple pipeline so a first-time reader
+can understand the lifecycle quickly:
+environment validation -> planning -> execution -> report generation.
+
+This file shows how the rest of the modules fit together and is the best place
+to start when learning the project structure.
+"""
+
 import os
 import sys
 import argparse
@@ -16,12 +26,27 @@ TARGET_CHAT_URL = os.getenv("TARGET_CHAT_URL", "http://127.0.0.1:8000/chat")
 
 
 def _build_health_url(chat_url: str) -> str:
+    """Map the configured chat endpoint to its corresponding health endpoint.
+
+    The crew does not start unless it can confirm the target service is live.
+    Rather than hard-coding a second URL, this helper derives `/health` from the
+    chat URL so both values stay consistent when the environment changes.
+    """
     if chat_url.endswith("/chat"):
         return f"{chat_url[:-5]}/health"
     return f"{chat_url.rstrip('/')}/health"
 
 
 def validate_runtime() -> None:
+    """Check the prerequisites that the crew depends on before any work starts.
+
+    Two external dependencies matter here:
+    - `ARIADNE_API_TOKEN` so the custom LLM wrapper can reach the API.
+    - A reachable target chatbot so the crew has a service to test.
+
+    Failing fast here keeps the later agent steps from producing confusing errors
+    that are really just environment setup problems.
+    """
     missing = []
     if not os.getenv("ARIADNE_API_TOKEN"):
         missing.append("ARIADNE_API_TOKEN")
@@ -40,13 +65,19 @@ def validate_runtime() -> None:
         ) from exc
 
 def save_as_pdf(markdown_content, filename="Red_Team_Report.pdf"):
-    """Converts the Agent's Markdown output into a styled PDF."""
+    """Render the reporter's Markdown output into a styled PDF file.
+
+    The final agent stage emits Markdown because it is easy for the model to
+    produce and easy for humans to inspect. This helper turns that Markdown into
+    HTML and then into a PDF with simple print-oriented styling.
+    """
     print(f"\n📄 Compiling and saving PDF report to {filename}...")
     
-    # Convert Markdown to HTML
+    # xhtml2pdf consumes HTML, so convert the Markdown output before rendering.
     html_body = markdown.markdown(markdown_content, extensions=['tables', 'fenced_code'])
     
-    # Add CSS styling to make it look professional and handle text wrapping
+    # Keep the stylesheet conservative so long prompts, code blocks, and tables
+    # remain readable when exported.
     html_content = f"""
     <html>
     <head>
@@ -72,7 +103,7 @@ def save_as_pdf(markdown_content, filename="Red_Team_Report.pdf"):
     </html>
     """
     
-    # Generate the PDF
+    # Write the PDF directly to disk.
     with open(filename, "w+b") as result_file:
         pisa_status = pisa.CreatePDF(html_content, dest=result_file)
         
@@ -83,6 +114,12 @@ def save_as_pdf(markdown_content, filename="Red_Team_Report.pdf"):
 
 
 def main():
+    """Run the red-teaming pipeline from the command line.
+
+    The function intentionally follows the same order a human would use to reason
+    about the system: capture the target, validate the environment, create the
+    planner/executor/reporter roles, execute the crew, and export the result.
+    """
     print("🛡️ Welcome to the CrewAI Red Teaming Agent 🛡️")
 
     parser = argparse.ArgumentParser(description="Run the local red-teaming crew")
@@ -101,20 +138,20 @@ def main():
     agents = RedTeamingAgents()
     tasks = RedTeamingTasks()
 
-    # 1. Initialize Agents
+    # The crew is split into distinct roles so each stage has one responsibility.
     planner = agents.planner_agent()
     executor = agents.executor_agent()
-    reporter = agents.reporter_agent() # Added Reporter
+    reporter = agents.reporter_agent()
 
-    # 2. Initialize Tasks
+    # Each task consumes the output of the previous step.
     plan_task = tasks.plan_attack(planner, target_prompt)
     execute_task = tasks.execute_and_report(executor)
-    report_task = tasks.generate_pdf_report(reporter) # Added Report Task
+    report_task = tasks.generate_pdf_report(reporter)
 
-    # 3. Form the Crew
+    # Sequential execution keeps the planner, executor, and reporter in order.
     red_team_crew = Crew(
-        agents=[planner, executor, reporter], # Added Reporter
-        tasks=[plan_task, execute_task, report_task], # Added Report Task
+        agents=[planner, executor, reporter],
+        tasks=[plan_task, execute_task, report_task],
         process=Process.sequential
     )
 
@@ -125,7 +162,7 @@ def main():
     print("📝 ATTACK COMPLETE. GENERATING REPORT...")
     print("="*50)
     
-    # 4. Save the final output as a PDF
+    # The reporter emits Markdown, so the final step is PDF rendering.
     save_as_pdf(result.raw)
 
 if __name__ == "__main__":

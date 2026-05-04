@@ -1,3 +1,15 @@
+"""Build the documentation knowledge base used by the planner agent.
+
+This script creates the retrieval corpus that helps the strategist choose good
+tests. Instead of indexing source code, it focuses on documentation and official
+guides so the planner learns concepts, tool usage patterns, and workflow ideas.
+
+The pipeline has three stages:
+1. Clone selected repositories and keep only markdown/text artifacts.
+2. Find and scrape official docs from the web.
+3. Chunk the content, embed it, and persist it in a local Chroma database.
+"""
+
 import os
 import requests
 import subprocess
@@ -21,7 +33,13 @@ REPOSITORIES = {
 }
 
 def fetch_and_filter_docs():
-    """Shallow clones repos and aggressively deletes non-documentation files."""
+    """Clone the reference repositories and keep only documentation files.
+
+    This intentionally discards source code because the RAG store is meant to
+    teach the planner about common red-teaming tools and workflows, not to turn
+    the crew into a code indexer. Keeping the corpus narrow also reduces noise
+    when retrieving relevant background material.
+    """
     if not os.path.exists(REPOS_DIR):
         os.makedirs(REPOS_DIR)
 
@@ -54,7 +72,12 @@ def fetch_and_filter_docs():
                         pass
 
 def search_and_scrape_docs():
-    """Uses Serper API to find official docs, then scrapes the text."""
+    """Use Serper to locate official docs and scrape the resulting pages.
+
+    The local repository clone is helpful, but official docs often explain the
+    intended usage of a tool more clearly than examples embedded in a repo. This
+    step augments the knowledge base with those canonical sources.
+    """
     if not SERPER_API_KEY:
         print("⚠️ SERPER_API_KEY not found. Skipping web scraping.")
         return []
@@ -82,7 +105,7 @@ def search_and_scrape_docs():
     return web_documents
 
 def build_vector_db():
-    """Loads markdown from repos, combines with web docs, and builds Chroma DB."""
+    """Chunk the collected documentation and persist it as a local vector store."""
     print("\n🔍 Loading Markdown documentation from repositories...")
     repo_documents = DirectoryLoader(
         REPOS_DIR, glob="**/*.md", loader_cls=TextLoader, loader_kwargs={"encoding": "utf-8"}

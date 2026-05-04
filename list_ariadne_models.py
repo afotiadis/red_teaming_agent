@@ -1,20 +1,15 @@
-"""
-Ariadne API Examples - https://ariadne.issel.ee.auth.gr
+"""Ariadne API examples and model-listing utility.
+
+This script is a quick sanity check for the Ariadne token and a small discovery
+tool for seeing which model identifiers are available. It is separate from the
+main crew because users may want to inspect the API before running the full
+red-teaming workflow.
 
 Requirements: pip install requests python-dotenv
 
 Setup:
-    1. Create .env file: ARIADNE_API_TOKEN=sk-proj-YOUR-TOKEN
-    2. Run: python ariadne_api_examples.py
-
-Examples included:
-    1. Simple Chat (non-streaming)
-    2. Multi-turn Conversation
-    3. Function/Tool Calling
-    4. List Available Models
-    5. Error Handling
-    6. Streaming Chat (SSE)
-    7. Streaming with Tools
+    1. Create a .env file with ARIADNE_API_TOKEN=sk-proj-YOUR-TOKEN.
+    2. Run this script with Python to print the available models.
 """
 
 import requests
@@ -33,7 +28,7 @@ except ImportError:
 BASE_URL = "https://ariadne.issel.ee.auth.gr/api"
 
 def example4_list_models():
-    """List available models"""
+    """Fetch and print the model catalog returned by the Ariadne API."""
     print("\n" + "="*70)
     print("EXAMPLE 4: Available Models")
     print("="*70)
@@ -50,6 +45,7 @@ def example4_list_models():
         print(f"  📦 {model['name']} - provider='{model['provider']}', model='{model['id']}'")
 
 def main():
+    """Validate the token and display the available Ariadne models."""
     if API_TOKEN == "sk-proj-YOUR-TOKEN" or not API_TOKEN:
         print("\n⚠️  Set ARIADNE_API_TOKEN in .env file")
         print("Get your token: https://ariadne.issel.ee.auth.gr")
@@ -60,7 +56,8 @@ def main():
     print("="*70)
     
     try:
-        # Non-streaming examples
+        # This script only demonstrates the model-listing path; the other examples
+        # are documented in the header for reference.
         example4_list_models()
         
         print("\n" + "="*70)

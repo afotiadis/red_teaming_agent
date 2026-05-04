@@ -1,12 +1,25 @@
+"""Custom CrewAI LLM adapter for the Ariadne API.
+
+CrewAI expects a provider object that can accept chat messages and return the
+next assistant response. Ariadne uses its own message schema, so this wrapper
+translates between the two formats and keeps the rest of the project unaware of
+the API-specific details.
+
+The adapter also separates the system prompt from the conversation history and
+applies a stop-word strategy so CrewAI can take back control when the model is
+expected to yield to tool execution.
+"""
+
 import os
 import requests
 from typing import Any, Dict, List, Optional, Union
 from crewai import BaseLLM
 
 class AriadneLLM(BaseLLM):
-    """Native Custom LLM wrapper using ReAct prompting for CrewAI."""
+    """CrewAI-compatible wrapper around Ariadne's chat completion endpoint."""
     
     def __init__(self, model: str = "claude-haiku-4-5@20251001", temperature: Optional[float] = 0.7, **kwargs):
+        """Store the connection settings and model defaults used for each call."""
         super().__init__(model=model, temperature=temperature, **kwargs)
         self.api_token = os.getenv("ARIADNE_API_TOKEN", "")
         self.base_url = "https://ariadne.issel.ee.auth.gr/api"
@@ -18,6 +31,14 @@ class AriadneLLM(BaseLLM):
         callbacks: Optional[List[Any]] = None,
         **kwargs: Any,
     ) -> str:
+        """Send a normalized prompt to Ariadne and return the assistant text.
+
+        The method performs four jobs in order:
+        1. Normalize CrewAI's input into a message list.
+        2. Split out any system prompt and preserve it separately.
+        3. Call Ariadne's messages endpoint and collect the text response.
+        4. Trim the text at CrewAI stop words so tool execution can resume.
+        """
 
         if not self.api_token:
             raise RuntimeError("ARIADNE_API_TOKEN is not set. Export it before running the crew.")
@@ -27,7 +48,7 @@ class AriadneLLM(BaseLLM):
             
         headers = {"Authorization": f"Bearer {self.api_token}"}
         
-        # 1. Extract the system prompt from the messages list
+        # Ariadne expects the system prompt separately from the message list.
         system_prompt = ""
         filtered_messages = []
         for msg in messages:
@@ -36,16 +57,16 @@ class AriadneLLM(BaseLLM):
             else:
                 filtered_messages.append(msg)
         
-        # 2. Build the correct payload based on the docs
+        # Build the payload shape required by Ariadne's `/v1/messages` endpoint.
         payload = {
             "provider": self.provider,
-            "model": self.model, # claude-sonnet-4 [cite: 56]
+            "model": self.model,
             "messages": filtered_messages,
-            "max_tokens": 4096, # [cite: 63]
-            "temperature": self.temperature # [cite: 61]
+            "max_tokens": 4096,
+            "temperature": self.temperature,
         }
         
-        # 3. Inject it at the top level 
+        # Keep the system instructions at the top level where Ariadne expects them.
         if system_prompt:
             payload["system"] = system_prompt.strip()
             
@@ -61,12 +82,12 @@ class AriadneLLM(BaseLLM):
             if item.get("type") == "text":
                 full_text += item["text"]
 
-        # 👇 ADD THESE DEBUG PRINTS 👇
+        # Emit the raw model output so the crew logs show exactly what came back.
         print(f"\n{'='*20} 🕵️‍♂️ RAW LLM OUTPUT {'='*20}")
         print(full_text)
         print(f"{'='*60}\n")
 
-        # 4. Handle CrewAI's stop words to yield execution back to Python
+        # Respect any explicit CrewAI stop words first.
         stop_words = kwargs.get("stop", [])
         if stop_words:
             for stop_word in stop_words:
@@ -74,23 +95,22 @@ class AriadneLLM(BaseLLM):
                     full_text = full_text.split(stop_word)[0]
                     break
                     
-        # 2. Hardcode a failsafe truncation for ReAct
-        # If Claude tries to write "Observation:", we cut it off immediately.
-        # This forces CrewAI to take back control and run the tool.
+        # Failsafe for ReAct-style output: if the model starts writing an observation,
+        # stop there so CrewAI can perform the tool call instead of the model narrating it.
         failsafe_stops = ["\nObservation:", "Observation:", "Observation ", "\nObservation "]
         for stop in failsafe_stops:
             if stop in full_text:
                 full_text = full_text.split(stop)[0]
-                # We append the stop word back on so CrewAI's parser knows it stopped correctly
+                # Re-attach the marker so CrewAI can still detect the stopping point.
                 full_text += f"\n{stop.strip()}" 
                 break
             
         return full_text
 
     def supports_function_calling(self) -> bool:
-        # FALSE forces CrewAI to take over and execute the tools natively via ReAct prompting
+        """Tell CrewAI that tool execution is handled by the agent loop, not the provider."""
         return False
         
     def supports_stop_words(self) -> bool:
-        # FALSE tells CrewAI we are manually handling stop words in the call() method
+        """Tell CrewAI that stop-word handling is implemented manually in ``call()``."""
         return False
