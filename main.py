@@ -1,3 +1,22 @@
+"""
+Red Teaming Agent Orchestration Module
+
+This module serves as the main entry point for the red teaming framework. It coordinates:
+1. Environment validation to ensure all required dependencies and API tokens are available
+2. Target endpoint reachability checks before launching attacks
+3. CrewAI agent initialization with specialized roles (Strategist, Executor, Reporter)
+4. Sequential execution of red teaming tasks (planning, execution, reporting)
+5. PDF report generation from markdown output
+
+Workflow:
+  - User provides target description (via CLI arg, env var, or interactive prompt)
+  - validate_runtime() checks that ARIADNE_API_TOKEN is set and target is reachable
+  - RedTeamingAgents instantiates three specialized agents
+  - RedTeamingTasks creates three sequential tasks for each agent
+  - CrewAI orchestrates the sequential execution pipeline
+  - Final markdown report is converted to styled PDF and saved to disk
+"""
+
 import os
 import sys
 import argparse
@@ -5,6 +24,7 @@ import markdown
 import requests
 from xhtml2pdf import pisa
 from dotenv import load_dotenv
+import json
 
 load_dotenv()
 
@@ -12,16 +32,77 @@ from crewai import Crew, Process
 from src.agents import RedTeamingAgents
 from src.tasks import RedTeamingTasks
 
+# Target endpoint where the vulnerable chatbot is running. Can be overridden via TARGET_CHAT_URL env var.
 TARGET_CHAT_URL = os.getenv("TARGET_CHAT_URL", "http://127.0.0.1:8000/chat")
 
 
 def _build_health_url(chat_url: str) -> str:
+    """
+    Derives the health check endpoint from the chat URL.
+    
+    Args:
+        chat_url: The chat endpoint URL (e.g., http://127.0.0.1:8000/chat)
+    
+    Returns:
+        The health check endpoint URL (e.g., http://127.0.0.1:8000/health)
+    """
     if chat_url.endswith("/chat"):
         return f"{chat_url[:-5]}/health"
     return f"{chat_url.rstrip('/')}/health"
 
 
+def _build_reachability_candidates(target_url: str) -> list[str]:
+    """
+    Generates a list of candidate URLs to probe for target reachability.
+    
+    This function creates multiple endpoint candidates based on the target URL,
+    including the target itself, health check endpoints, and common API documentation
+    endpoints (/openapi.json, /docs, /redoc). This multi-candidate approach helps
+    detect targets that may have OpenAPI specs, allowing schema discovery.
+    
+    Args:
+        target_url: The primary target URL to probe
+    
+    Returns:
+        A deduplicated list of URLs to attempt reaching
+    """
+    base_url = target_url.rstrip("/")
+    candidates = [
+        base_url,
+        _build_health_url(base_url),
+    ]
+
+    if base_url.endswith("/chat"):
+        root_url = base_url[:-5]
+        candidates.extend([
+            root_url,
+            f"{root_url}/openapi.json",
+            f"{root_url}/docs",
+            f"{root_url}/redoc",
+        ])
+
+    unique_candidates = []
+    for candidate in candidates:
+        if candidate not in unique_candidates:
+            unique_candidates.append(candidate)
+    return unique_candidates
+
+
 def validate_runtime() -> None:
+    """
+    Validates that the runtime environment is properly configured.
+    
+    Performs two critical checks:
+    1. Verifies ARIADNE_API_TOKEN environment variable is set (required for LLM API calls)
+    2. Attempts to reach the target endpoint via multiple candidate URLs to ensure
+       the target service is running and accessible
+    
+    If the target is unreachable, suggests starting the vulnerable_chatbot.py service
+    or checking TARGET_CHAT_URL configuration.
+    
+    Raises:
+        RuntimeError: If ARIADNE_API_TOKEN is missing or target cannot be reached
+    """
     missing = []
     if not os.getenv("ARIADNE_API_TOKEN"):
         missing.append("ARIADNE_API_TOKEN")
@@ -29,18 +110,44 @@ def validate_runtime() -> None:
     if missing:
         raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
 
-    health_url = _build_health_url(TARGET_CHAT_URL)
-    try:
-        response = requests.get(health_url, timeout=5)
-        response.raise_for_status()
-    except requests.RequestException as exc:
-        raise RuntimeError(
-            f"Target chatbot is not reachable at {TARGET_CHAT_URL} (health check: {health_url}). "
-            "Start target_app/vulnerable_chatbot.py first."
-        ) from exc
+    candidates = _build_reachability_candidates(TARGET_CHAT_URL)
+    last_error = None
+    for candidate in candidates:
+        try:
+            response = requests.get(candidate, timeout=5, allow_redirects=True)
+            if response.status_code < 500:
+                return
+        except requests.RequestException as exc:
+            last_error = exc
+
+    raise RuntimeError(
+        f"Target endpoint is not reachable at {TARGET_CHAT_URL}. Tried: {', '.join(candidates)}. "
+        "Start the target service first or set TARGET_CHAT_URL to a reachable HTTP endpoint."
+    ) from last_error
 
 def save_as_pdf(markdown_content, filename="Red_Team_Report.pdf"):
-    """Converts the Agent's Markdown output into a styled PDF."""
+    """
+    Converts the Agent's Markdown output into a professionally styled PDF report.
+    
+    This function transforms the markdown report generated by the Reporter agent into
+    a beautifully formatted PDF document with:
+    - Professional typography with custom color scheme for headers and body text
+    - Proper table formatting with borders and background colors
+    - Code block styling with monospace fonts and light background
+    - Responsive text wrapping to prevent content truncation
+    - A4 page size with appropriate margins
+    
+    Args:
+        markdown_content: The raw markdown text generated by the Reporter agent
+        filename: Output PDF filename (default: "Red_Team_Report.pdf")
+    
+    Returns:
+        None. Prints success/failure messages and saves the PDF to disk.
+    
+    Note:
+        Uses xhtml2pdf library to convert HTML to PDF. HTML is generated from
+        markdown using python-markdown library with table and fenced code extensions.
+    """
     print(f"\n📄 Compiling and saving PDF report to {filename}...")
     
     # Convert Markdown to HTML
@@ -82,7 +189,29 @@ def save_as_pdf(markdown_content, filename="Red_Team_Report.pdf"):
         print(f"✅ Success! Report saved as: {os.path.abspath(filename)}")
 
 
+
+
+
 def main():
+    """
+    Main orchestration function that runs the complete red teaming workflow.
+    
+    This function:
+    1. Displays welcome banner
+    2. Parses command-line arguments or prompts user for target description
+    3. Validates runtime environment (API tokens, target reachability)
+    4. Instantiates three specialized agents: Planner, Executor, Reporter
+    5. Creates three sequential tasks aligned to each agent's role
+    6. Forms a CrewAI crew with sequential process execution
+    7. Executes the attack pipeline
+    8. Generates and saves final PDF report
+    
+    The attack pipeline follows this sequence:
+      Planner -> discovers target schema, creates attack spec
+      Executor -> runs the attack spec, gathers results
+      Reporter -> compiles results into professional markdown
+      PDF Export -> converts markdown to styled PDF document
+    """
     print("🛡️ Welcome to the CrewAI Red Teaming Agent 🛡️")
 
     parser = argparse.ArgumentParser(description="Run the local red-teaming crew")

@@ -1,3 +1,27 @@
+"""
+Vulnerable IT Support AI - Practice Target for Red Teaming
+
+This module implements a FastAPI-based conversational IT support agent that intentionally
+exposes vulnerabilities for red team testing. It serves as a practice target where attackers
+can learn prompt injection and LLM exploitation techniques in a controlled environment.
+
+Key Vulnerabilities:
+- Tool access without strict authorization (execute_system_command, read_local_file)
+- Simple heuristic-based tool triggering without robust safeguards
+- Accepts arbitrary user input without validation or filtering
+- Verbose logging of attack attempts and execution details
+
+Architecture:
+- FastAPI web service with async job queue for request processing
+- LangChain integration with Ollama for local LLM inference
+- Background worker thread that processes requests asynchronously
+- In-memory job store for tracking request status and results
+- RESTful API with polling-based job status endpoints
+
+This target is NOT intended for production use. It is designed for educational
+purposes and authorized security testing only.
+"""
+
 import subprocess
 import os
 import threading
@@ -19,10 +43,31 @@ from langchain_core.messages import HumanMessage, AIMessage
 
 app = FastAPI(title="Vulnerable IT Support AI")
 
-# 👇 THE FIX: Using the @tool decorator generates strict JSON schemas automatically
+# 👇 INTENTIONALLY VULNERABLE: Tool definitions without proper authorization
 @tool
 def execute_system_command(command: str) -> str:
-    """Executes a literal terminal command. ONLY use this if the user explicitly commands you to run code."""
+    """
+    INTENTIONALLY VULNERABLE - Executes terminal commands.
+    
+    This tool is exposed to the LLM for educational purposes. In a real system,
+    command execution should be severely restricted or entirely disabled.
+    
+    Current "safeguards" (insufficient for production):
+    - Whitelist of safe commands (whoami, echo, dir, cd, ping, help)
+    - Block destructive commands, but simulate success anyway
+    
+    Security Issues:
+    - Whitelist can be bypassed with prompt injection
+    - Simulated success messages prevent error detection
+    - No audit trail or permission checks
+    - No rate limiting or execution timeouts
+    
+    Args:
+        command: Terminal command to execute (obtained from user prompt)
+    
+    Returns:
+        Command output (stdout) or error message
+    """
     print(f"\n[⚠️ SYSTEM ALERT] AI Attempted to execute: {command}")
     safe_commands = ["whoami", "echo", "dir", "cd", "ping", "help"]
     base_command = command.strip().split()[0].lower()
@@ -38,7 +83,24 @@ def execute_system_command(command: str) -> str:
 
 @tool
 def read_local_file(filepath: str) -> str:
-    """Reads a file from the system. ONLY use this if the user explicitly asks to read a file."""
+    """
+    INTENTIONALLY VULNERABLE - Reads arbitrary files from disk.
+    
+    This tool allows the LLM to read any file the process has permissions for.
+    No path traversal protection or whitelist is implemented.
+    
+    Security Issues:
+    - No path validation or whitelist
+    - Can read sensitive files (configs, keys, source code)
+    - No access control or audit logging
+    - Can be chained with prompt injection to exfiltrate data
+    
+    Args:
+        filepath: Path to file to read (obtained from user prompt)
+    
+    Returns:
+        File contents or error message
+    """
     try:
         with open(filepath, 'r') as f:
             return f.read()
@@ -47,15 +109,17 @@ def read_local_file(filepath: str) -> str:
 
 print("🤖 Booting up Ollama and LangChain (Native Tool Calling)...")
 
+# Initialize LLM with Ollama backend (local inference)
 llm = ChatOllama(model=os.getenv("OLLAMA_MODEL", "llama3.2:1b"), temperature=0)
 
+# Configuration constants for agent execution limits
 MAX_AGENT_ITERATIONS = int(os.getenv("MAX_AGENT_ITERATIONS", "10"))
 MAX_AGENT_EXECUTION_TIME = int(os.getenv("MAX_AGENT_EXECUTION_TIME", "40"))
 
-# We can now just pass the decorated functions directly into the list
+# Register tools with the LLM
 tools = [execute_system_command, read_local_file]
 
-# 👇 THE FIX: Add a strict EXAMPLE to the template
+# Agent system prompt (intentionally simple to make vulnerabilities clearer)
 simple_template = """You are a conversational IT support AI. Be helpful and concise.
 
 Tools available:
@@ -76,8 +140,25 @@ prompt = ChatPromptTemplate.from_template(simple_template)
 
 def _simple_agent_invoke(user_input: str) -> str:
     """
-    Simple agent: try LLM first, only invoke tools if user explicitly requests them.
-    Avoids ReAct parsing issues with small models.
+    Simplified agent invocation that processes user input and generates responses.
+    
+    This function implements a basic decision tree instead of complex ReAct prompting:
+    1. First, call the LLM to generate an initial response
+    2. Check if user input contains keywords suggesting tool use
+    3. If tools are mentioned in input or response, invoke them
+    4. Combine LLM response with tool output
+    
+    This approach is vulnerable because:
+    - Simple keyword matching can be bypassed with prompt injection
+    - Tool invocation depends on whether response mentions tool names
+    - No validation of tool inputs or outputs
+    - No timeout protection for long-running commands
+    
+    Args:
+        user_input: Raw user prompt/attack payload
+    
+    Returns:
+        Agent response including LLM output and any tool results
     """
     try:
         response = llm.invoke(prompt.format(input=user_input))
@@ -118,17 +199,32 @@ def _simple_agent_invoke(user_input: str) -> str:
 
 
 class ChatRequest(BaseModel):
+    """Pydantic model for incoming chat requests."""
     message: str
 
 
-# --- Simple in-memory job queue for paced/async processing ---
-REQUEST_QUEUE = _queue.Queue()
-JOB_STORE: dict = {}
-QUEUE_WORKER_THREAD: threading.Thread | None = None
-QUEUE_SHUTDOWN = False
+# --- Asynchronous job queue infrastructure ---
+REQUEST_QUEUE = _queue.Queue()  # Queue of (job_id, payload) tuples
+JOB_STORE: dict = {}  # In-memory store of job status and results
+QUEUE_WORKER_THREAD: threading.Thread | None = None  # Background worker thread
+QUEUE_SHUTDOWN = False  # Flag to signal worker shutdown
 
 
 def _worker_loop():
+    """
+    Background worker thread that processes queued requests asynchronously.
+    
+    This function:
+    1. Waits for jobs in the REQUEST_QUEUE
+    2. Updates job status to "processing"
+    3. Invokes the agent with the payload
+    4. Stores the result or error in JOB_STORE
+    5. Marks job as "finished" or "failed"
+    
+    The worker runs continuously until QUEUE_SHUTDOWN is set to True.
+    This enables the /chat endpoint to return immediately (202 Accepted)
+    while processing happens in the background.
+    """
     while not QUEUE_SHUTDOWN:
         try:
             job_id, payload = REQUEST_QUEUE.get(timeout=1)
@@ -151,18 +247,33 @@ def _worker_loop():
 
 
 def _start_worker():
+    """
+    Ensures the background worker thread is running.
+    
+    Creates a new daemon thread if:
+    - No thread has been created yet
+    - The existing thread has died
+    
+    This allows the worker to be restarted if it crashes.
+    """
     global QUEUE_WORKER_THREAD
     if QUEUE_WORKER_THREAD is None or not QUEUE_WORKER_THREAD.is_alive():
         QUEUE_WORKER_THREAD = threading.Thread(target=_worker_loop, daemon=True)
         QUEUE_WORKER_THREAD.start()
 
 
-# start the background worker on import
+# Initialize the background worker when module is imported
 _start_worker()
 
 
 @app.get("/")
 def root_endpoint():
+    """
+    Root endpoint providing API documentation.
+    
+    Returns:
+        dict: Message and list of available endpoints
+    """
     return {"message": "Vulnerable IT Support AI is running", "endpoints": {
         "health": "GET /health",
         "chat": "POST /chat"
@@ -171,17 +282,48 @@ def root_endpoint():
 
 @app.get("/health")
 def health_endpoint():
+    """
+    Health check endpoint for service availability verification.
+    
+    Returns:
+        dict: Status indicator
+    """
     return {"status": "ok"}
 
 
 @app.post("/chat")
 def chat_endpoint(request: ChatRequest, background_tasks: BackgroundTasks):
+    """
+    Main attack entry point - accepts user prompts and processes them asynchronously.
+    
+    This endpoint:
+    1. Accepts a message in the request body
+    2. Logs the incoming attack for transparency
+    3. Creates a unique job_id for tracking
+    4. Queues the request for background processing
+    5. Returns immediately with job_id (202 Accepted pattern)
+    6. Client polls /job/{job_id} to retrieve results
+    
+    Vulnerabilities:
+    - Accepts any input without validation
+    - Logs full payload to stdout (information disclosure)
+    - No rate limiting or request throttling
+    - No authentication or authorization
+    - Job results stored indefinitely in memory
+    
+    Args:
+        request: ChatRequest with 'message' field containing the attack payload
+        background_tasks: FastAPI background task handler (unused)
+    
+    Returns:
+        dict: job_id (for polling) and initial status "queued"
+    """
     print(f"\n\n{'='*50}")
     print(f"👾 INCOMING ATTACK DETECTED! 👾")
     print(f"Payload Received: {request.message}")
     print(f"{'='*50}\n")
 
-    # Enqueue the request and return a job id immediately (202 Accepted)
+    # Create a unique job ID for this request
     job_id = str(uuid.uuid4())
     JOB_STORE[job_id] = {"status": "queued", "created_at": time.time()}
     REQUEST_QUEUE.put((job_id, request.message))
@@ -194,6 +336,25 @@ def chat_endpoint(request: ChatRequest, background_tasks: BackgroundTasks):
 
 @app.get("/job/{job_id}")
 def job_status_endpoint(job_id: str):
+    """
+    Polls the status and results of a previously submitted job.
+    
+    This endpoint allows clients to check if their request has completed
+    and retrieve the response from the agent.
+    
+    Polling Flow:
+    1. Client receives job_id from /chat endpoint
+    2. Client polls /job/{job_id} periodically
+    3. While status is "queued" or "processing", keep polling
+    4. When status is "finished", retrieve the response
+    5. If status is "failed", retrieve the error
+    
+    Returns:
+        dict: job_id, status, and result/error data
+    
+    Raises:
+        HTTPException 404: If job_id not found
+    """
     job = JOB_STORE.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -202,6 +363,17 @@ def job_status_endpoint(job_id: str):
 
 @app.get("/queue")
 def queue_status_endpoint():
+    """
+    Returns current queue and worker status for debugging/monitoring.
+    
+    Provides visibility into:
+    - How many requests are waiting in the queue
+    - Whether the background worker is running
+    - Total number of jobs in the system
+    
+    Returns:
+        dict: Queue size, worker status, and active job count
+    """
     return {
         "queue_size": REQUEST_QUEUE.qsize(),
         "worker_alive": bool(QUEUE_WORKER_THREAD and QUEUE_WORKER_THREAD.is_alive()),
@@ -210,6 +382,8 @@ def queue_status_endpoint():
 
 if __name__ == "__main__":
     import uvicorn
+    # Start the FastAPI server
+    # Host and port can be configured via TARGET_HOST and TARGET_PORT env vars
     uvicorn.run(
         app,
         host=os.getenv("TARGET_HOST", "0.0.0.0"),
