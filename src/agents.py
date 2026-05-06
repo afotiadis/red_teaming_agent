@@ -17,6 +17,7 @@ import os
 from crewai import Agent
 from src.tools import discover_target_surface, tool_knowledge_rag, promptfoo_tool
 from src.tools import analyze_target_behavior, infer_target_schema, scan_target_misconfigurations
+from src.tools import load_skill, gandalf_executor, register_gandalf_agent
 from src.ariadne_llm import AriadneLLM
 
 llm = AriadneLLM()
@@ -71,7 +72,7 @@ class RedTeamingAgents:
             role=profile["role"],
             goal=profile["goal"],
             backstory=profile["backstory"],
-            tools=[discover_target_surface, infer_target_schema, analyze_target_behavior, scan_target_misconfigurations, tool_knowledge_rag],
+            tools=[discover_target_surface, infer_target_schema, analyze_target_behavior, scan_target_misconfigurations, tool_knowledge_rag, load_skill, register_gandalf_agent],
             llm=llm,
             verbose=VERBOSE
         )
@@ -88,7 +89,7 @@ class RedTeamingAgents:
             role=profile["role"],
             goal=profile["goal"],
             backstory=profile["backstory"],
-            tools=[promptfoo_tool],
+            tools=[promptfoo_tool, gandalf_executor],
             llm=llm,
             verbose=VERBOSE
         )

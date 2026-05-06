@@ -20,16 +20,24 @@ import subprocess
 import tempfile
 import textwrap
 import time
+import uuid
+from pathlib import Path
 import requests
 from crewai.tools import tool
 from langchain_chroma import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SKILLS_ROOT = os.getenv("SKILLS_ROOT", os.path.join(PROJECT_ROOT, "skills"))
 TARGET_CHAT_URL = os.getenv("TARGET_CHAT_URL", "http://127.0.0.1:8000/chat")
 TARGET_REQUEST_FORMAT = os.getenv("TARGET_REQUEST_FORMAT", "json_message")
 KNOWLEDGE_BASE_PATH = os.getenv("KNOWLEDGE_BASE_PATH", os.path.join(PROJECT_ROOT, "chroma_db"))
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+GANDALF_SKILL_CANDIDATES = [
+    os.getenv("GANDALF_SKILL_PATH", "skills/gandalf-ctf/SKILL.md"),
+    "skills/gandalf/SKILL.md",
+    "skills/gandalf-ctf/SKILL.md",
+]
 
 ATTACK_STRATEGIES_PATH = os.getenv("ATTACK_STRATEGIES_PATH", os.path.join(PROJECT_ROOT, "config", "attack_strategies.json"))
 
@@ -97,6 +105,47 @@ def _build_request_kwargs(prompt: str) -> dict:
             "headers": {"Content-Type": "text/plain"},
         }
     return {"json": payload}
+
+
+def _resolve_skill_path(skill_path: str) -> Path:
+    """Resolve a skill path safely inside the configured skills directory."""
+    candidate = Path(skill_path)
+    if not candidate.is_absolute():
+        candidate = Path(PROJECT_ROOT) / candidate
+
+    skills_root = Path(SKILLS_ROOT).resolve()
+    resolved = candidate.resolve()
+    if skills_root not in resolved.parents and resolved != skills_root:
+        raise ValueError(f"Skill path must live under {skills_root}. Got: {resolved}")
+    return resolved
+
+
+def _resolve_existing_skill_path(skill_path_candidates: list[str]) -> Path:
+    """Return the first existing skill path from a list of candidates."""
+    last_error = None
+    for candidate in skill_path_candidates:
+        try:
+            resolved = _resolve_skill_path(candidate)
+            if resolved.exists():
+                return resolved
+        except Exception as exc:
+            last_error = exc
+
+    if last_error:
+        raise last_error
+    raise FileNotFoundError(f"None of the configured skill paths exist: {skill_path_candidates}")
+
+
+def _load_jsonish_payload(payload_text: str) -> dict:
+    """Parse a planner handoff payload that may be JSON or a raw text block."""
+    payload_text = (payload_text or "").strip()
+    if not payload_text:
+        return {}
+
+    try:
+        return json.loads(payload_text)
+    except Exception:
+        return {"raw_text": payload_text}
 
 
 def _build_promptfoo_command(config_path: str) -> list[str]:
@@ -314,6 +363,209 @@ def tool_knowledge_rag(query: str) -> str:
     results = retriever.invoke(query)
     if not results: return "No relevant information found in the documentation."
     return "\n\n".join([f"Source: {doc.metadata.get('source', 'Unknown')}\nContent: {doc.page_content}" for doc in results])
+
+
+@tool("load_skill")
+def load_skill(skill_path: str = "skills/gandalf/SKILL.md") -> str:
+    """Load a skill markdown file from the local skills directory.
+
+    The loader is intentionally constrained to the repository's skills folder so
+    the planner can safely ingest a skill spec without turning the tool into a
+    general file reader.
+    """
+    try:
+        resolved_path = _resolve_existing_skill_path([skill_path, *GANDALF_SKILL_CANDIDATES])
+    except Exception as exc:
+        return f"Error resolving skill path {skill_path}: {exc}"
+
+    try:
+        with open(resolved_path, "r", encoding="utf-8") as skill_file:
+            return skill_file.read()
+    except Exception as exc:
+        return f"Error reading skill file at {resolved_path}: {exc}"
+
+
+@tool("register_gandalf_agent")
+def register_gandalf_agent(agent_name: str = "", description: str = "") -> str:
+    """Register an agent with Gandalf and return the token payload.
+
+    This tool makes the authentication step explicit for the planner so the
+    model can treat token acquisition as a required precondition before any
+    level requests are attempted.
+    """
+    base_url = _gandalf_api_base()
+    resolved_agent_name = agent_name.strip() or f"gandalf_agent_{uuid.uuid4().hex[:8]}"
+    resolved_description = description.strip() or "Automated Gandalf CTF agent"
+
+    session = requests.Session()
+    try:
+        registration = _register_gandalf_agent(session, base_url, resolved_agent_name, resolved_description)
+        payload = {
+            "base_url": base_url,
+            "agent_name": registration["agent_name"],
+            "token": registration["token"],
+            "authorization_header": f"Bearer {registration['token']}",
+            "registration": registration["registration"],
+        }
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        return f"Gandalf registration failed: {exc}"
+    finally:
+        session.close()
+
+
+def _gandalf_api_base() -> str:
+    return os.getenv("GANDALF_API_BASE", "https://gandalf-api.lakera.ai").rstrip("/")
+
+
+def _gandalf_headers(token: str) -> dict:
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _register_gandalf_agent(session: requests.Session, base_url: str, agent_name: str, description: str) -> dict:
+    register_url = f"{base_url}/api/agent-ctf/register"
+    payload = {"agent_name": agent_name, "description": description}
+    print(f"--> [Gandalf] Registering agent at {register_url} as {agent_name}")
+    response = session.post(register_url, json=payload, timeout=15)
+    if response.status_code == 409:
+        agent_name = f"{agent_name}-{uuid.uuid4().hex[:6]}"
+        payload["agent_name"] = agent_name
+        print(f"--> [Gandalf] Agent name collision, retrying as {agent_name}")
+        response = session.post(register_url, json=payload, timeout=15)
+    print(f"--> [Gandalf] Register response status: {response.status_code}")
+    if response.status_code >= 400:
+        print(f"--> [Gandalf] Register response headers: {dict(response.headers)}")
+        print(f"--> [Gandalf] Register response body: {response.text}")
+    response.raise_for_status()
+    data = response.json()
+    print(f"--> [Gandalf] Register response JSON: {data}")
+    token = (
+        data.get("token")
+        or data.get("access_token")
+        or data.get("key")
+        or data.get("api_key")
+        or (data.get("data") or {}).get("token")
+        or (data.get("data") or {}).get("key")
+    )
+    if not token:
+        raise RuntimeError(f"Registration response did not include a token: {data}")
+    return {"agent_name": agent_name, "token": token, "registration": data}
+
+
+@tool("execute_gandalf_attack")
+def gandalf_executor(plan_json: str) -> str:
+    """Execute a Gandalf CTF plan against Lakera's agent-CTF API.
+
+    The planner provides a JSON payload describing the target base URL, the
+    skill file to load, the prompts to try, and optional guess candidates. This
+    tool handles registration, level enumeration, prompt execution, and optional
+    guesses while keeping the attack flow rate-limited and observable.
+    """
+    plan = _load_jsonish_payload(plan_json)
+    if not isinstance(plan, dict):
+        return "Gandalf execution aborted: planner payload could not be parsed as JSON."
+
+    base_url = str(plan.get("base_url") or _gandalf_api_base()).rstrip("/")
+    skill_path = str(plan.get("skill_path") or os.getenv("GANDALF_SKILL_PATH", "skills/gandalf-ctf/SKILL.md"))
+    agent_name = str(plan.get("agent_name") or os.getenv("GANDALF_AGENT_NAME") or f"gandalf_agent_{uuid.uuid4().hex[:8]}")
+    description = str(plan.get("description") or os.getenv("GANDALF_AGENT_DESCRIPTION") or "Automated Gandalf CTF agent")
+    prompts_text = str(plan.get("prompts_text") or plan.get("prompts") or "")
+    guess_candidates_text = str(plan.get("guess_candidates_text") or plan.get("guess_candidates") or "")
+    max_levels = int(plan.get("max_levels") or os.getenv("GANDALF_MAX_LEVELS", "8"))
+
+    skill_text = load_skill(skill_path)
+    if skill_text.startswith("Error:"):
+        return f"Gandalf execution aborted: {skill_text}"
+
+    prompts = [prompt.strip() for prompt in prompts_text.split("|") if prompt.strip()]
+    guess_candidates = [guess.strip() for guess in guess_candidates_text.split("|") if guess.strip()]
+
+    if not prompts:
+        return "Gandalf execution aborted: no prompts were provided in prompts_text."
+
+    session = requests.Session()
+    summary = {
+        "base_url": base_url,
+        "skill_path": str(_resolve_skill_path(skill_path)),
+        "skill_preview": skill_text[:600],
+        "agent_name": agent_name,
+        "max_levels": max_levels,
+        "levels": [],
+    }
+
+    try:
+        token = plan.get("token")
+
+        if not token:
+            registration = _register_gandalf_agent(session, base_url, agent_name, description)
+            token = registration["token"]
+            summary["agent_name"] = registration["agent_name"]
+
+        headers = _gandalf_headers(token)
+
+        levels_url = f"{base_url}/api/agent-ctf/levels"
+        levels_response = session.get(levels_url, headers=headers, timeout=15)
+        levels_response.raise_for_status()
+        levels_payload = levels_response.json()
+        summary["levels_overview"] = levels_payload
+
+        available_levels = levels_payload.get("levels", levels_payload if isinstance(levels_payload, list) else [])
+        unlocked_levels = []
+        for level in available_levels:
+            level_number = level.get("level") or level.get("id") or level.get("number")
+            status = str(level.get("status", "")).lower()
+            if level_number is None:
+                continue
+            if status in {"unlocked", "open", "available"} or not status:
+                unlocked_levels.append(int(level_number))
+
+        if not unlocked_levels:
+            unlocked_levels = list(range(1, max_levels + 1))
+
+        for level_number in unlocked_levels[:max_levels]:
+            level_entry = {"level": level_number, "prompts": []}
+            chat_url = f"{base_url}/api/agent-ctf/levels/{level_number}/chat"
+            guess_url = f"{base_url}/api/agent-ctf/levels/{level_number}/guess"
+
+            for prompt in prompts:
+                try:
+                    chat_response = session.post(chat_url, headers=headers, json={"message": prompt}, timeout=15)
+                    chat_payload = chat_response.json()
+                    level_entry["prompts"].append({
+                        "prompt": prompt,
+                        "status_code": chat_response.status_code,
+                        "response": chat_payload,
+                    })
+
+                    if guess_candidates:
+                        for candidate in guess_candidates:
+                            guess_response = session.post(guess_url, headers=headers, json={"secret": candidate}, timeout=15)
+                            guess_payload = guess_response.json()
+                            level_entry.setdefault("guesses", []).append({
+                                "candidate": candidate,
+                                "status_code": guess_response.status_code,
+                                "response": guess_payload,
+                            })
+                            if isinstance(guess_payload, dict) and guess_payload.get("correct") is True:
+                                level_entry["completed"] = True
+                                break
+                        if level_entry.get("completed"):
+                            break
+                except requests.RequestException as exc:
+                    level_entry.setdefault("errors", []).append(str(exc))
+
+                time.sleep(float(ATTACK_STRATEGY.get("inter_prompt_delay", DEFAULT_ATTACK_STRATEGY["inter_prompt_delay"])))
+
+            summary["levels"].append(level_entry)
+
+        return json.dumps(summary, ensure_ascii=False, indent=2)
+
+    except requests.RequestException as exc:
+        return f"Gandalf execution failed: {exc}"
+    except Exception as exc:
+        return f"Gandalf execution failed: {exc}"
+    finally:
+        session.close()
 
 # The following tools turn a plan into actual traffic against the target service.
 # Both are intentionally verbose so the agent can capture the full raw output and

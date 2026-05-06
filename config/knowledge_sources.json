@@ -28,5 +28,12 @@
       "query": "site:azure.github.io/PyRIT",
       "enabled": true
     }
+  ],
+  "local_documents": [
+    {
+      "name": "gandalf-skill",
+      "path": "skills/gandalf-ctf/SKILL.md",
+      "enabled": true
+    }
   ]
 }

@@ -15,6 +15,7 @@ import json
 import requests
 import subprocess
 import shutil
+from pathlib import Path
 from dotenv import load_dotenv
 from langchain_community.document_loaders import DirectoryLoader, TextLoader, WebBaseLoader
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -22,6 +23,10 @@ from langchain_chroma import Chroma
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 load_dotenv()
+
+# WebBaseLoader emits a warning if USER_AGENT is unset; provide a safe default
+# so documentation scraping can run without extra shell setup.
+os.environ.setdefault("USER_AGENT", "red_teaming_agent/1.0")
 
 REPOS_DIR = os.getenv("REPOS_DIR", "data/repos")
 DB_DIR = os.getenv("KNOWLEDGE_BASE_PATH", "chroma_db")
@@ -51,10 +56,37 @@ def _load_knowledge_sources() -> dict:
                 {"name": "agentic-radar", "url": "https://github.com/splx-ai/agentic-radar.git", "enabled": True},
             ],
             "web_searches": [{"query": query, "enabled": True} for query in SEARCH_QUERIES],
+            "local_documents": [
+                {"name": "gandalf-skill", "path": "skills/gandalf/SKILL.md", "enabled": True},
+            ],
         }
 
 
 KNOWLEDGE_SOURCES = _load_knowledge_sources()
+
+
+def _load_local_documents():
+    """Load explicitly configured local markdown documents into the corpus."""
+    local_documents = []
+    for doc_config in KNOWLEDGE_SOURCES.get("local_documents", []):
+        if not doc_config.get("enabled", True):
+            continue
+
+        doc_path = Path(doc_config["path"])
+        if not doc_path.is_absolute():
+            doc_path = Path(PROJECT_ROOT) / doc_path
+
+        if not doc_path.exists():
+            print(f"⚠️ Local doc not found: {doc_path}")
+            continue
+
+        try:
+            local_documents.extend(TextLoader(str(doc_path), encoding="utf-8").load())
+            print(f"📘 Loaded local document: {doc_config.get('name', doc_path.name)}")
+        except Exception as exc:
+            print(f"⚠️ Failed to load local document {doc_path}: {exc}")
+
+    return local_documents
 
 def fetch_and_filter_docs():
     """Clone the reference repositories and keep only documentation files.
@@ -79,8 +111,8 @@ def fetch_and_filter_docs():
             print(f"📥 Shallow cloning {name} from {url}...")
             subprocess.run(["git", "clone", "--depth", "1", url, repo_path], check=True)
         else:
-            print(f"✅ {name} already exists. Pulling latest changes...")
-            subprocess.run(["git", "-C", repo_path, "pull", "--depth", "1"], check=True)
+            print(f"✅ {name} already exists. Reusing the local checkout instead of pulling updates.")
+            print("   If you want a fresh clone, delete the repo folder and rerun ingestion.")
 
         print(f"🧹 Purging source code from {name}, keeping only documentation...")
         for root, dirs, files in os.walk(repo_path, topdown=False):
@@ -144,7 +176,7 @@ def build_vector_db():
     ).load()
     print(f"📄 Found {len(repo_documents)} repo documentation files.")
 
-    all_documents = repo_documents + search_and_scrape_docs()
+    all_documents = repo_documents + search_and_scrape_docs() + _load_local_documents()
 
     print("\n✂️ Splitting documents into chunks...")
     chunks = RecursiveCharacterTextSplitter(
