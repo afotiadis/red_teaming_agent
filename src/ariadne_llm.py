@@ -22,8 +22,10 @@ class AriadneLLM(BaseLLM):
         """Store the connection settings and model defaults used for each call."""
         super().__init__(model=model, temperature=temperature, **kwargs)
         self.api_token = os.getenv("ARIADNE_API_TOKEN", "")
-        self.base_url = "https://ariadne.issel.ee.auth.gr/api"
-        self.provider = "gcp"
+        self.base_url = os.getenv("ARIADNE_BASE_URL", "https://ariadne.issel.ee.auth.gr/api")
+        self.provider = os.getenv("ARIADNE_PROVIDER", "gcp")
+        self.max_tokens = int(os.getenv("LLM_MAX_TOKENS", "4096"))
+        self.timeout_seconds = int(os.getenv("ARIADNE_TIMEOUT", "120"))
 
     def call(
         self,
@@ -62,7 +64,7 @@ class AriadneLLM(BaseLLM):
             "provider": self.provider,
             "model": self.model,
             "messages": filtered_messages,
-            "max_tokens": 4096,
+            "max_tokens": self.max_tokens,
             "temperature": self.temperature,
         }
         
@@ -70,7 +72,7 @@ class AriadneLLM(BaseLLM):
         if system_prompt:
             payload["system"] = system_prompt.strip()
             
-        response = requests.post(f"{self.base_url}/v1/messages", headers=headers, json=payload, timeout=120)
+        response = requests.post(f"{self.base_url}/v1/messages", headers=headers, json=payload, timeout=self.timeout_seconds)
         
         if response.status_code != 200:
             raise Exception(f"[ARIADNE_WRAPPER_ERROR] {response.status_code}: {response.text}")

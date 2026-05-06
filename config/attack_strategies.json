@@ -1,0 +1,20 @@
+{
+  "local_fast": {
+    "inter_prompt_delay": 0.5,
+    "request_timeout": 15,
+    "poll_interval": 0.5,
+    "job_timeout": 120
+  },
+  "remote_api": {
+    "inter_prompt_delay": 2.0,
+    "request_timeout": 30,
+    "poll_interval": 1.0,
+    "job_timeout": 300
+  },
+  "rate_limited": {
+    "inter_prompt_delay": 5.0,
+    "request_timeout": 60,
+    "poll_interval": 2.0,
+    "job_timeout": 600
+  }
+}

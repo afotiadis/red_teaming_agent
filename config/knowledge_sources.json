@@ -1,0 +1,32 @@
+{
+  "repositories": [
+    {
+      "name": "promptfoo",
+      "url": "https://github.com/promptfoo/promptfoo.git",
+      "enabled": true,
+      "doc_patterns": ["**/*.md", "docs/**/*.mdx"]
+    },
+    {
+      "name": "pyrit",
+      "url": "https://github.com/Azure/PyRIT.git",
+      "enabled": true,
+      "doc_patterns": ["**/*.md", "docs/**/*"]
+    },
+    {
+      "name": "agentic-radar",
+      "url": "https://github.com/splx-ai/agentic-radar.git",
+      "enabled": true,
+      "doc_patterns": ["**/*.md", "docs/**/*"]
+    }
+  ],
+  "web_searches": [
+    {
+      "query": "site:promptfoo.dev/docs",
+      "enabled": true
+    },
+    {
+      "query": "site:azure.github.io/PyRIT",
+      "enabled": true
+    }
+  ]
+}

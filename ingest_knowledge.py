@@ -11,6 +11,7 @@ The pipeline has three stages:
 """
 
 import os
+import json
 import requests
 import subprocess
 import shutil
@@ -22,15 +23,38 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 load_dotenv()
 
-REPOS_DIR = "data/repos"
-DB_DIR = "chroma_db"
+REPOS_DIR = os.getenv("REPOS_DIR", "data/repos")
+DB_DIR = os.getenv("KNOWLEDGE_BASE_PATH", "chroma_db")
 SERPER_API_KEY = os.getenv("SERPER_API_KEY")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1000"))
+CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "200"))
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+KNOWLEDGE_SOURCES_PATH = os.getenv("KNOWLEDGE_SOURCES_PATH", os.path.join(PROJECT_ROOT, "config", "knowledge_sources.json"))
+SEARCH_QUERIES = [
+    query.strip()
+    for query in os.getenv("SEARCH_QUERIES", "site:promptfoo.dev/docs,site:azure.github.io/PyRIT").split(",")
+    if query.strip()
+]
 
-REPOSITORIES = {
-    "promptfoo": "https://github.com/promptfoo/promptfoo.git",
-    "pyrit": "https://github.com/Azure/PyRIT.git",
-    "agentic-radar": "https://github.com/splx-ai/agentic-radar.git"
-}
+
+def _load_knowledge_sources() -> dict:
+    """Load repository and search sources from JSON, falling back to env defaults."""
+    try:
+        with open(KNOWLEDGE_SOURCES_PATH, "r", encoding="utf-8") as source_file:
+            return json.load(source_file)
+    except Exception:
+        return {
+            "repositories": [
+                {"name": "promptfoo", "url": "https://github.com/promptfoo/promptfoo.git", "enabled": True},
+                {"name": "pyrit", "url": "https://github.com/Azure/PyRIT.git", "enabled": True},
+                {"name": "agentic-radar", "url": "https://github.com/splx-ai/agentic-radar.git", "enabled": True},
+            ],
+            "web_searches": [{"query": query, "enabled": True} for query in SEARCH_QUERIES],
+        }
+
+
+KNOWLEDGE_SOURCES = _load_knowledge_sources()
 
 def fetch_and_filter_docs():
     """Clone the reference repositories and keep only documentation files.
@@ -43,7 +67,12 @@ def fetch_and_filter_docs():
     if not os.path.exists(REPOS_DIR):
         os.makedirs(REPOS_DIR)
 
-    for name, url in REPOSITORIES.items():
+    for repo_config in KNOWLEDGE_SOURCES.get("repositories", []):
+        if not repo_config.get("enabled", True):
+            continue
+
+        name = repo_config["name"]
+        url = repo_config["url"]
         repo_path = os.path.join(REPOS_DIR, name)
         
         if not os.path.exists(repo_path):
@@ -83,11 +112,14 @@ def search_and_scrape_docs():
         return []
 
     print("\n🌐 Searching the web for official documentation...")
-    queries = ["site:promptfoo.dev/docs", "site:azure.github.io/PyRIT"]
     all_urls = []
     headers = {'X-API-KEY': SERPER_API_KEY, 'Content-Type': 'application/json'}
 
-    for query in queries:
+    for search_config in KNOWLEDGE_SOURCES.get("web_searches", []):
+        if not search_config.get("enabled", True):
+            continue
+
+        query = search_config["query"]
         payload = {"q": query, "num": 5}
         response = requests.post("https://google.serper.dev/search", headers=headers, json=payload)
         if response.status_code == 200:
@@ -115,14 +147,18 @@ def build_vector_db():
     all_documents = repo_documents + search_and_scrape_docs()
 
     print("\n✂️ Splitting documents into chunks...")
-    chunks = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200, length_function=len).split_documents(all_documents)
+    chunks = RecursiveCharacterTextSplitter(
+        chunk_size=CHUNK_SIZE,
+        chunk_overlap=CHUNK_OVERLAP,
+        length_function=len,
+    ).split_documents(all_documents)
 
     print("🧠 Generating embeddings and building Chroma database...")
     if os.path.exists(DB_DIR): shutil.rmtree(DB_DIR)
     
     Chroma.from_documents(
         documents=chunks, 
-        embedding=HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2"), 
+        embedding=HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL), 
         persist_directory=DB_DIR
     )
     print(f"✅ Knowledge base successfully built and saved to ./{DB_DIR}/")

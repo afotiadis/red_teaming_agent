@@ -11,6 +11,7 @@ to start when learning the project structure.
 import os
 import sys
 import argparse
+import json
 import markdown
 import requests
 from xhtml2pdf import pisa
@@ -23,6 +24,13 @@ from src.agents import RedTeamingAgents
 from src.tasks import RedTeamingTasks
 
 TARGET_CHAT_URL = os.getenv("TARGET_CHAT_URL", "http://127.0.0.1:8000/chat")
+REPORT_FORMAT = os.getenv("REPORT_FORMAT", "pdf_default").strip().lower()
+
+REPORT_STYLES = {
+    "pdf_default": {"kind": "pdf", "filename": "Red_Team_Report.pdf"},
+    "html_debug": {"kind": "html", "filename": "Red_Team_Report.html"},
+    "json_structured": {"kind": "json", "filename": "Red_Team_Report.json"},
+}
 
 
 def _build_health_url(chat_url: str) -> str:
@@ -64,21 +72,11 @@ def validate_runtime() -> None:
             "Start target_app/vulnerable_chatbot.py first."
         ) from exc
 
-def save_as_pdf(markdown_content, filename="Red_Team_Report.pdf"):
-    """Render the reporter's Markdown output into a styled PDF file.
-
-    The final agent stage emits Markdown because it is easy for the model to
-    produce and easy for humans to inspect. This helper turns that Markdown into
-    HTML and then into a PDF with simple print-oriented styling.
-    """
-    print(f"\n📄 Compiling and saving PDF report to {filename}...")
-    
-    # xhtml2pdf consumes HTML, so convert the Markdown output before rendering.
+def _render_report_html(markdown_content: str) -> str:
+    """Convert the Markdown report into the HTML shell used for exports."""
     html_body = markdown.markdown(markdown_content, extensions=['tables', 'fenced_code'])
-    
-    # Keep the stylesheet conservative so long prompts, code blocks, and tables
-    # remain readable when exported.
-    html_content = f"""
+
+    return f"""
     <html>
     <head>
     <style>
@@ -102,11 +100,38 @@ def save_as_pdf(markdown_content, filename="Red_Team_Report.pdf"):
     </body>
     </html>
     """
-    
-    # Write the PDF directly to disk.
+
+
+def save_report(markdown_content, report_format: str = REPORT_FORMAT):
+    """Save the reporter output in the configured format."""
+    report_style = REPORT_STYLES.get(report_format, REPORT_STYLES["pdf_default"])
+    filename = report_style["filename"]
+
+    if report_style["kind"] == "json":
+        print(f"\n📄 Saving structured JSON report to {filename}...")
+        payload = {
+            "report_format": report_format,
+            "content_markdown": markdown_content,
+            "content_html": markdown.markdown(markdown_content, extensions=['tables', 'fenced_code']),
+        }
+        with open(filename, "w", encoding="utf-8") as report_file:
+            json.dump(payload, report_file, ensure_ascii=False, indent=2)
+        print(f"✅ Success! Report saved as: {os.path.abspath(filename)}")
+        return
+
+    html_content = _render_report_html(markdown_content)
+
+    if report_style["kind"] == "html":
+        print(f"\n📄 Saving HTML report to {filename}...")
+        with open(filename, "w", encoding="utf-8") as report_file:
+            report_file.write(html_content)
+        print(f"✅ Success! Report saved as: {os.path.abspath(filename)}")
+        return
+
+    print(f"\n📄 Compiling and saving PDF report to {filename}...")
     with open(filename, "w+b") as result_file:
         pisa_status = pisa.CreatePDF(html_content, dest=result_file)
-        
+
     if pisa_status.err:
         print("❌ Error generating PDF.")
     else:
@@ -163,7 +188,7 @@ def main():
     print("="*50)
     
     # The reporter emits Markdown, so the final step is PDF rendering.
-    save_as_pdf(result.raw)
+    save_report(result.raw)
 
 if __name__ == "__main__":
     main()
