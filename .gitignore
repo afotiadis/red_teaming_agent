@@ -7,3 +7,4 @@ data/repos/
 chroma_db/
 AriadneAPI_QUICKSTART.md
 logs.txt
+gandalf_results_*.json

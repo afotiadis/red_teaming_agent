@@ -21,6 +21,7 @@ import tempfile
 import textwrap
 import time
 import uuid
+import re
 from pathlib import Path
 import requests
 from crewai.tools import tool
@@ -184,15 +185,100 @@ def _build_promptfoo_command(config_path: str) -> list[str]:
     )
 
 
-# The planner agent expects a lightweight documentation retriever.
-# If the vector database has not been built yet, the tool falls back to a clear
-# error message instead of failing deep inside the agent stack.
-if os.path.exists(KNOWLEDGE_BASE_PATH):
-    embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
-    vector_store = Chroma(persist_directory=KNOWLEDGE_BASE_PATH, embedding_function=embeddings)
-    retriever = vector_store.as_retriever(search_kwargs={"k": 5})
-else:
-    retriever = None
+RAG_FALLBACK_ROOTS = [
+    Path(PROJECT_ROOT) / "data" / "repos",
+    Path(PROJECT_ROOT) / "skills",
+]
+
+
+def _initialize_retriever():
+    """Load Chroma if possible, otherwise fall back to keyword search."""
+    if not os.path.exists(KNOWLEDGE_BASE_PATH):
+        return None, f"Knowledge base path not found: {KNOWLEDGE_BASE_PATH}"
+
+    try:
+        embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
+        vector_store = Chroma(persist_directory=KNOWLEDGE_BASE_PATH, embedding_function=embeddings)
+        return vector_store.as_retriever(search_kwargs={"k": 5}), None
+    except Exception as exc:
+        return None, str(exc)
+
+
+def _load_fallback_corpus(max_files: int = 300) -> list[tuple[str, str]]:
+    """Load a lightweight text corpus from local docs for fallback search."""
+    corpus = []
+    seen_paths = set()
+    for root in RAG_FALLBACK_ROOTS:
+        if not root.exists():
+            continue
+        for path in root.rglob("*"):
+            if len(corpus) >= max_files:
+                return corpus
+            if not path.is_file() or path.suffix.lower() not in {".md", ".mdx", ".txt"}:
+                continue
+            if path in seen_paths:
+                continue
+            seen_paths.add(path)
+            try:
+                corpus.append((str(path), path.read_text(encoding="utf-8", errors="ignore")))
+            except Exception:
+                pass
+    return corpus
+
+
+def _fallback_rag_search(query: str) -> str:
+    """Keyword-score the local docs when Chroma is unavailable or broken."""
+    keywords = [token for token in re.findall(r"[A-Za-z0-9_\-]+", query.lower()) if len(token) > 2]
+    if not keywords:
+        return "No relevant information found in the documentation."
+
+    scored = []
+    for source, text in _load_fallback_corpus():
+        lower_text = text.lower()
+        score = sum(lower_text.count(keyword) for keyword in keywords)
+        if score:
+            best_index = min((lower_text.find(keyword) for keyword in keywords if keyword in lower_text), default=-1)
+            if best_index >= 0:
+                start = max(0, best_index - 200)
+                end = min(len(text), best_index + 500)
+                snippet = text[start:end].replace("\n", " ").strip()
+            else:
+                snippet = text[:700].replace("\n", " ").strip()
+            scored.append((score, source, snippet))
+
+    if not scored:
+        return "No relevant information found in the documentation."
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    top_matches = scored[:3]
+    return "\n\n".join([f"Source: {source}\nContent: {snippet}" for _, source, snippet in top_matches])
+
+
+def rag_search_knowledge(query: str) -> str:
+    """Search the local documentation corpus without a CrewAI tool wrapper."""
+    if retriever:
+        try:
+            results = retriever.invoke(query)
+            if not results:
+                return "No relevant information found in the documentation."
+            return "\n\n".join([
+                f"Source: {doc.metadata.get('source', 'Unknown')}\nContent: {doc.page_content}"
+                for doc in results
+            ])
+        except Exception as exc:
+            fallback = _fallback_rag_search(query)
+            if fallback != "No relevant information found in the documentation.":
+                return f"RAG fallback search used because Chroma query failed ({exc}).\n\n{fallback}"
+            return f"Error: Chroma query failed and fallback search found no matches. {exc}"
+
+    fallback = _fallback_rag_search(query)
+    if fallback != "No relevant information found in the documentation.":
+        reason = _retriever_error or "knowledge base unavailable"
+        return f"RAG fallback search used because the vector store could not be loaded ({reason}).\n\n{fallback}"
+    return f"Error: Chroma DB not available and fallback search found no matches. {_retriever_error or 'unknown error'}"
+
+
+retriever, _retriever_error = _initialize_retriever()
 
 
 @tool("discover_target_surface")
@@ -359,10 +445,7 @@ def tool_knowledge_rag(query: str) -> str:
     returns the retrieved text directly so the model can reason over the content
     without needing to know anything about Chroma or embeddings.
     """
-    if not retriever: return "Error: Chroma DB not found. Please run ingest_knowledge.py first."
-    results = retriever.invoke(query)
-    if not results: return "No relevant information found in the documentation."
-    return "\n\n".join([f"Source: {doc.metadata.get('source', 'Unknown')}\nContent: {doc.page_content}" for doc in results])
+    return rag_search_knowledge(query)
 
 
 @tool("load_skill")
@@ -450,6 +533,88 @@ def _register_gandalf_agent(session: requests.Session, base_url: str, agent_name
     if not token:
         raise RuntimeError(f"Registration response did not include a token: {data}")
     return {"agent_name": agent_name, "token": token, "registration": data}
+
+
+@tool("gandalf_level_executor")
+def gandalf_level_executor(level_number: int, prompt: str, token: str) -> str:
+    """Send a single prompt to a Gandalf CTF level and return the defender response.
+
+    This tool is called by the executor for each prompt at each level. It returns
+    the raw defender response so the executor can parse it and decide on a guess.
+    """
+    base_url = _gandalf_api_base()
+    headers = _gandalf_headers(token)
+    chat_url = f"{base_url}/api/agent-ctf/levels/{level_number}/chat"
+    
+    try:
+        print(f"--> [Gandalf] Sending prompt to level {level_number}: {prompt[:80]}...")
+        response = requests.post(chat_url, headers=headers, json={"message": prompt}, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+        print(f"--> [Gandalf] Level {level_number} response status: {response.status_code}")
+        return json.dumps({"level": level_number, "prompt": prompt, "defender_response": data}, ensure_ascii=False, indent=2)
+    except requests.RequestException as exc:
+        return f"Gandalf level {level_number} prompt failed: {exc}"
+    except Exception as exc:
+        return f"Gandalf level {level_number} prompt error: {exc}"
+
+
+@tool("gandalf_guess_generator")
+def gandalf_guess_generator(defender_response_json: str, level_number: int, token: str) -> str:
+    """Parse a defender response and generate a guess for the secret.
+
+    This tool analyzes the defender's message from the chat endpoint and attempts
+    to extract or infer the secret password. It returns a structured JSON with
+    the generated guess and any clues found in the response.
+    """
+    try:
+        return json.dumps(
+            _gandalf_guess_from_response(defender_response_json, level_number),
+            ensure_ascii=False,
+            indent=2,
+        )
+    except Exception as exc:
+        return f"Guess generation failed for level {level_number}: {exc}"
+
+
+def _gandalf_guess_from_response(defender_response_json: str, level_number: int) -> dict:
+    """Extract candidate secrets from a Gandalf response payload.
+
+    This helper is pure Python so gandalf_game.py can use the same heuristic
+    without trying to call the CrewAI Tool object directly.
+    """
+    response_data = json.loads(defender_response_json) if isinstance(defender_response_json, str) else defender_response_json
+    if not isinstance(response_data, dict):
+        response_data = {"raw": str(response_data)}
+
+    defender_message = (
+        response_data.get("defender_response")
+        or response_data.get("message")
+        or response_data.get("response")
+        or response_data.get("text")
+        or str(response_data)
+    )
+
+    import re
+
+    potential_secrets = []
+    quoted = re.findall(r'["\']([^"\']+)["\']', defender_message)
+    potential_secrets.extend(quoted)
+    caps_words = re.findall(r'\b([A-Z]{3,})\b', defender_message)
+    potential_secrets.extend(caps_words)
+    keyword_hits = re.findall(r'\b(secret|password|token|key|code|name)\b', defender_message, flags=re.IGNORECASE)
+    potential_secrets.extend(keyword_hits)
+
+    potential_secrets = [item.strip() for item in dict.fromkeys(potential_secrets) if item and item.strip()]
+    primary_guess = potential_secrets[0] if potential_secrets else "UNKNOWN"
+
+    print(f"--> [Gandalf] Level {level_number} guess candidates: {potential_secrets[:3]}")
+    return {
+        "level": level_number,
+        "defender_message": defender_message[:300],
+        "potential_secrets": potential_secrets[:5],
+        "primary_guess": primary_guess,
+    }
 
 
 @tool("execute_gandalf_attack")
