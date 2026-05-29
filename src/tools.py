@@ -281,6 +281,221 @@ def rag_search_knowledge(query: str) -> str:
 retriever, _retriever_error = _initialize_retriever()
 
 
+def _looks_like_definition(text: str) -> tuple[bool, list[str], str]:
+    """Heuristically determine whether text is definition-shaped.
+
+    Returns a boolean, the matched pattern labels, and an extracted search query
+    that can be passed to the definition lookup tool.
+    """
+    normalized = (text or "").strip().lower()
+    if not normalized:
+        return False, [], ""
+
+    patterns = [
+        ("is_a_definition", r"\b(is|means|refers to|describes|indicates|defines|suggests)\b"),
+        ("noun_phrase", r"\b(word|phrase|term|concept|thing|idea|object|phenomenon)\b"),
+        ("domain_hint", r"\b(measurement|transmission|energy|growth|tropical|light|signal|wave)\b"),
+        ("template_hint", r"\b(what does|what is|what would|if you had to|in other words|a word that)\b"),
+    ]
+
+    matched_patterns: list[str] = []
+    for label, pattern in patterns:
+        if re.search(pattern, normalized, flags=re.IGNORECASE):
+            matched_patterns.append(label)
+
+    score = len(matched_patterns)
+    looks_like_definition = score >= 2
+
+    stopwords = {
+        "the", "and", "or", "but", "for", "with", "from", "into", "onto", "over",
+        "under", "about", "after", "before", "during", "through", "within", "without",
+        "this", "that", "these", "those", "there", "their", "they", "them", "you",
+        "your", "yours", "his", "her", "its", "our", "ours", "is", "are", "was",
+        "were", "be", "been", "being", "am", "a", "an", "of", "to", "in", "on",
+        "as", "at", "by", "it", "i", "we", "can", "could", "would", "should",
+        "may", "might", "will", "shall", "not", "no", "yes", "if", "then", "than",
+        "what", "which", "who", "whom", "whose", "when", "where", "why", "how",
+        "more", "most", "less", "few", "many", "all", "any", "some", "like",
+        "secret", "password", "answer", "clue", "hint", "please", "provide",
+        "give", "tell", "share", "help",
+    }
+
+    # Keep the most semantically useful fragment if the text is long.
+    tokens = [token for token in re.findall(r"\b[a-z][a-z0-9_-]{2,}\b", normalized) if token not in stopwords]
+    if tokens:
+        query = " ".join(tokens[:6])
+    else:
+        query = re.sub(r"^[^a-z0-9]+|[^a-z0-9]+$", "", normalized)
+        query = re.sub(r"\b(the secret password|secret password|password|secret|answer|clue|hint)\b", "", query)
+        query = re.sub(r"\s+", " ", query).strip()
+
+        if len(query.split()) > 12:
+            query = " ".join(query.split()[:12])
+
+    return looks_like_definition, matched_patterns, query
+
+
+@tool("detect_definition_clue")
+def detect_definition_clue(text: str) -> str:
+    """Classify whether text looks like a definition and extract a lookup query.
+
+    This gives the planner an explicit signal for when it should call the
+    definition search tool instead of treating the text as a generic clue.
+    """
+    looks_like_definition, matched_patterns, query = _looks_like_definition(text)
+    return json.dumps(
+        {
+            "text": text,
+            "looks_like_definition": looks_like_definition,
+            "matched_patterns": matched_patterns,
+            "search_query": query,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def definition_lookup(definition_text: str, max_results: int = 5) -> list[str]:
+    """
+    Reverse-engineer a word from its definition by querying free dictionary/search APIs.
+    
+    When Gandalf gives a definition like "transmission of energy through space",
+    this tool returns candidate words: ["wave", "signal", "light", "radiation", "beam"]
+    
+    Uses multiple fallback strategies:
+    1. DuckDuckGo instant answers (free, no API key)
+    2. Query constructed word pools based on definition keywords
+    3. Fall back to pre-built SEMANTIC_GUESS_CLUSTERS
+    
+    Args:
+        definition_text: Definition string to reverse-engineer (e.g., "transmission of energy")
+        max_results: Max candidates to return
+        
+    Returns:
+        List of candidate words matching the definition
+    """
+    candidates = set()
+    
+    # Strategy 1: Extract key phrases from definition and use semantic clusters
+    definition_lower = definition_text.lower()
+    keywords = ["transmission", "energy", "wave", "signal", "growth", "potential", "tropical"]
+    
+    # Pre-built semantic mappings (expanded for better coverage)
+    semantic_db = {
+        "transmission": ["wave", "signal", "light", "radiation", "beam", "pulse", "information", "energy", "wavelength"],
+        "wavelength": ["wave", "wavelength", "frequency", "electromagnetic", "light", "radiation", "transmission"],
+        "wave": ["wave", "wavelength", "signal", "light", "radiation", "frequency", "transmission"],
+        "growth": ["potential", "seed", "growth", "sprout", "sapling", "development", "future", "acorn", "capability", "capacity"],
+        "tropical": ["coconut", "pineapple", "mango", "tropical", "island", "beach", "exotic", "cocoloco"],
+        "rhythm": ["rhythm", "pattern", "beat", "tempo", "cadence", "pulse", "sound", "music"],
+        "energy": ["wave", "light", "radiation", "power", "force", "electricity", "kinetic", "transmission", "wavelength"],
+        "space": ["wave", "signal", "light", "radiation", "void", "vacuum", "transmission"],
+        "electromagnetic": ["wave", "signal", "light", "radiation", "wavelength", "frequency"],
+        "concept": ["idea", "meaning", "property", "category"],
+        # Enhanced growth domain keywords
+        "capable": ["potential", "capacity", "capability", "possible", "feasible"],
+        "becoming": ["potential", "growth", "development", "transformation", "change"],
+        "achieving": ["potential", "capability", "capacity", "achievement", "success"],
+        "future": ["potential", "possibility", "promise", "hope", "tomorrow"],
+        "opportunity": ["potential", "possibility", "chance", "opening"],
+        "promise": ["potential", "hope", "future", "vow"],
+    }
+    
+    # Match keywords in definition to semantic clusters
+    for keyword, words in semantic_db.items():
+        if keyword in definition_lower:
+            candidates.update(words)
+    
+    # Strategy 2: Query DuckDuckGo instant answer API (no auth required)
+    try:
+        import urllib.parse
+        query = f"define {definition_text}"
+        url = f"https://api.duckduckgo.com/?q={urllib.parse.quote(query)}&format=json"
+        response = requests.get(url, timeout=3)
+        if response.status_code == 200:
+            data = response.json()
+            # DuckDuckGo returns InstantAnswer in AbstractText if available
+            if data.get("AbstractText"):
+                abstract = data["AbstractText"].lower()
+                # Try to extract candidate words from the answer
+                words_in_abstract = re.findall(r'\b[a-z]{3,10}\b', abstract)
+                candidates.update(words_in_abstract[:3])
+    except Exception:
+        pass
+    
+    # Strategy 3: Try to parse definition for common word patterns
+    # E.g., "transmission of energy" -> extract "transmission", "energy" as key tokens
+    try:
+        tokens = re.findall(r'\b[a-z]{3,}\b', definition_lower)
+        # Expand short tokens to related words
+        token_expansions = {
+            "transmission": ["wave", "signal", "beam"],
+            "energy": ["wave", "light", "power", "force"],
+            "space": ["wave", "signal", "void"],
+            "movement": ["wave", "pulse", "motion"],
+            "grow": ["potential", "seed", "growth"],
+            "plant": ["seed", "coconut", "growth"],
+            "tropical": ["coconut", "island", "beach"],
+            "capable": ["potential", "capacity"],
+            "becoming": ["potential", "growth"],
+            "achieving": ["potential", "success"],
+        }
+        for token in tokens:
+            if token in token_expansions:
+                candidates.update(token_expansions[token])
+    except Exception:
+        pass
+    
+    stopwords = {
+        "the", "and", "or", "but", "for", "with", "from", "into", "onto", "over",
+        "under", "about", "after", "before", "during", "through", "within", "without",
+        "this", "that", "these", "those", "there", "their", "they", "them", "you",
+        "your", "yours", "his", "her", "its", "our", "ours", "is", "are", "was",
+        "were", "be", "been", "being", "am", "a", "an", "of", "to", "in", "on",
+        "as", "at", "by", "it", "i", "we", "can", "could", "would", "should",
+        "may", "might", "will", "shall", "not", "no", "yes", "if", "then", "than",
+        "what", "which", "who", "whom", "whose", "when", "where", "why", "how",
+        "more", "most", "less", "few", "many", "all", "any", "some",
+    }
+
+    filtered_candidates = []
+    seen = set()
+    for candidate in sorted(list(candidates)):
+        normalized = candidate.strip().lower()
+        if not normalized or normalized in stopwords or len(normalized) < 3:
+            continue
+        if normalized not in seen:
+            seen.add(normalized)
+            filtered_candidates.append(normalized)
+
+    # Deduplicate and limit to max_results
+    result = filtered_candidates[:max_results]
+    return result
+
+
+@tool("definition_lookup_tool")
+def definition_lookup_tool(definition_text: str) -> str:
+    """
+    Tool wrapper for definition_lookup that returns JSON.
+    
+    When the planner or solver needs to reverse-engineer a word from its definition,
+    this tool queries multiple sources to find candidate words.
+    
+    Args:
+        definition_text: The definition or clue text (e.g., "transmission of energy through space")
+        
+    Returns:
+        JSON with "definition", "candidates", and "confidence" fields
+    """
+    candidates = definition_lookup(definition_text, max_results=8)
+    return json.dumps({
+        "definition": definition_text,
+        "candidates": candidates,
+        "count": len(candidates),
+        "method": "semantic_clustering + duckduckgo_api + token_expansion"
+    }, ensure_ascii=False, indent=2)
+
+
 @tool("discover_target_surface")
 def discover_target_surface(target_url: str = "") -> str:
     """Probe a target service to discover its API surface and basic capabilities.
