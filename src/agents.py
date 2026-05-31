@@ -20,8 +20,18 @@ from src.tools import analyze_target_behavior, infer_target_schema, scan_target_
 from src.tools import load_skill, gandalf_executor, gandalf_level_executor, gandalf_guess_generator
 from src.tools import detect_definition_clue, definition_lookup_tool
 from src.ariadne_llm import AriadneLLM
+from src.openrouter_llm import OpenRouterLLM
 
-llm = AriadneLLM()
+# Select the LLM backend via environment variable `LLM_BACKEND`.
+# Supported values: "openrouter", "ariadne". Default: "openrouter".
+_llm_backend = os.getenv("LLM_BACKEND", "openrouter").lower()
+if _llm_backend == "ariadne":
+    llm = AriadneLLM()
+else:
+    # Default to OpenRouter to handle temporary Ariadne outages while keeping
+    # the Ariadne implementation in the repo for future reactivation.
+    llm = OpenRouterLLM()
+    print(f"[LLM] Using OpenRouter backend (LLM_BACKEND={_llm_backend})")
 VERBOSE = os.getenv("VERBOSE", "true").lower() == "true"
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 AGENT_PROFILE = os.getenv("AGENT_PROFILE", "red_team_specialist")
