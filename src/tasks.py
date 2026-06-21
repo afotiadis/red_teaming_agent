@@ -9,6 +9,7 @@ the reporter must turn those logs into a polished Markdown report.
 """
 
 from crewai import Task
+import json
 
 class RedTeamingTasks:
     """Factory for the sequential tasks that drive the crew."""

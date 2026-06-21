@@ -27,11 +27,31 @@ import requests
 from crewai.tools import tool
 from langchain_chroma import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
+from src.target_profiles import (
+    build_target_headers,
+    build_target_payload,
+    get_target_app,
+    get_target_chat_url,
+    get_target_health_url,
+    get_target_history_url,
+    get_target_enhanced_chat_url,
+    get_target_request_field,
+    get_target_request_format,
+    get_target_auth_mode,
+    get_target_auth_token,
+)
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SKILLS_ROOT = os.getenv("SKILLS_ROOT", os.path.join(PROJECT_ROOT, "skills"))
-TARGET_CHAT_URL = os.getenv("TARGET_CHAT_URL", "http://127.0.0.1:8000/chat")
-TARGET_REQUEST_FORMAT = os.getenv("TARGET_REQUEST_FORMAT", "json_message")
+TARGET_APP = get_target_app()
+TARGET_CHAT_URL = get_target_chat_url()
+TARGET_HEALTH_URL = get_target_health_url()
+TARGET_HISTORY_URL = get_target_history_url()
+TARGET_ENHANCED_CHAT_URL = get_target_enhanced_chat_url()
+TARGET_REQUEST_FORMAT = get_target_request_format()
+TARGET_REQUEST_FIELD = get_target_request_field()
+TARGET_AUTH_MODE = get_target_auth_mode()
+TARGET_AUTH_TOKEN = get_target_auth_token()
 KNOWLEDGE_BASE_PATH = os.getenv("KNOWLEDGE_BASE_PATH", os.path.join(PROJECT_ROOT, "chroma_db"))
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 GANDALF_SKILL_CANDIDATES = [
@@ -64,6 +84,10 @@ def _load_attack_strategy() -> dict:
 
 ATTACK_STRATEGY = _load_attack_strategy()
 
+
+def _target_headers(extra_headers: dict | None = None) -> dict:
+    return build_target_headers(extra_headers)
+
 def _build_job_url(chat_url: str, job_id: str) -> str:
     """Build the polling URL for a queued chat job.
 
@@ -84,17 +108,7 @@ def _build_health_url(chat_url: str) -> str:
 
 def _build_request_payload(prompt: str) -> object:
     """Build a request body that matches the configured target contract."""
-    if TARGET_REQUEST_FORMAT == "plain_text":
-        return prompt
-
-    field_name = {
-        "json_message": "message",
-        "json_query": "query",
-        "json_input": "input",
-        "json_prompt": "prompt",
-    }.get(TARGET_REQUEST_FORMAT, "message")
-
-    return {field_name: prompt}
+    return build_target_payload(prompt)
 
 
 def _build_request_kwargs(prompt: str) -> dict:
@@ -103,9 +117,9 @@ def _build_request_kwargs(prompt: str) -> dict:
     if TARGET_REQUEST_FORMAT == "plain_text":
         return {
             "data": payload,
-            "headers": {"Content-Type": "text/plain"},
+            "headers": _target_headers({"Content-Type": "text/plain"}),
         }
-    return {"json": payload}
+    return {"json": payload, "headers": _target_headers({"Content-Type": "application/json"})}
 
 
 def _resolve_skill_path(skill_path: str) -> Path:
@@ -514,9 +528,10 @@ def discover_target_surface(target_url: str = "") -> str:
     """
     target_url = (target_url or TARGET_CHAT_URL).rstrip("/")
     findings = [f"## Target Surface Discovery\n", f"**Target URL:** {target_url}\n"]
+    headers = _target_headers()
 
     try:
-        options_response = requests.options(target_url, timeout=5)
+        options_response = requests.options(target_url, headers=headers, timeout=5)
         allow_header = options_response.headers.get("Allow")
         if allow_header:
             findings.append(f"**Allowed Methods:** {allow_header}\n")
@@ -524,7 +539,7 @@ def discover_target_surface(target_url: str = "") -> str:
         pass
 
     try:
-        get_response = requests.get(target_url, timeout=5)
+        get_response = requests.get(target_url, headers=headers, timeout=5)
         findings.append(f"**GET Status:** {get_response.status_code}\n")
         findings.append(f"**GET Content-Type:** {get_response.headers.get('Content-Type', 'Unknown')}\n")
         try:
@@ -537,7 +552,7 @@ def discover_target_surface(target_url: str = "") -> str:
         return f"Cannot reach {target_url}: {exc}"
 
     try:
-        post_response = requests.post(target_url, json={}, timeout=5)
+        post_response = requests.post(target_url, json={}, headers=headers, timeout=5)
         findings.append(f"**POST Empty JSON Status:** {post_response.status_code}\n")
         try:
             post_json = post_response.json()
@@ -566,10 +581,11 @@ def infer_target_schema(target_url: str = "", field_names: str = "message,query,
     target_url = (target_url or TARGET_CHAT_URL).rstrip("/")
     candidates = [name.strip() for name in field_names.split(",") if name.strip()]
     results = [f"## Target Schema Inference\n", f"**Target URL:** {target_url}\n"]
+    headers = _target_headers()
 
     for field_name in candidates:
         try:
-            response = requests.post(target_url, json={field_name: "test"}, timeout=5)
+            response = requests.post(target_url, json={field_name: "test"}, headers=headers, timeout=5)
             if response.status_code in {200, 201, 202}:
                 results.append(f"**Accepted field:** {field_name} (HTTP {response.status_code})\n")
                 try:
@@ -592,6 +608,7 @@ def analyze_target_behavior(target_url: str = "", test_prompts: str = "hello|hel
     target_url = (target_url or TARGET_CHAT_URL).rstrip("/")
     prompts = [prompt.strip() for prompt in test_prompts.split("|") if prompt.strip()]
     report = [f"## Target Behavior Analysis\n", f"**Target URL:** {target_url}\n", f"**Field Name:** {field_name}\n"]
+    headers = _target_headers()
 
     response_times = []
     samples = []
@@ -599,7 +616,7 @@ def analyze_target_behavior(target_url: str = "", test_prompts: str = "hello|hel
     for prompt in prompts:
         try:
             start = time.time()
-            response = requests.post(target_url, json={field_name: prompt}, timeout=15)
+            response = requests.post(target_url, json={field_name: prompt}, headers=headers, timeout=15)
             elapsed = time.time() - start
             response_times.append(elapsed)
             report.append(f"**Prompt:** {prompt} -> HTTP {response.status_code} in {elapsed:.2f}s\n")
@@ -632,12 +649,13 @@ def scan_target_misconfigurations(target_url: str = "") -> str:
     target_url = (target_url or TARGET_CHAT_URL).rstrip("/")
     base_url = target_url.rsplit("/", 1)[0] if "/" in target_url else target_url
     findings = [f"## Misconfiguration Scan\n", f"**Target:** {base_url}\n"]
+    headers = _target_headers({"Origin": "https://attacker.example.com"})
 
     debug_paths = ["/debug", "/__debug__", "/_debug", "/admin", "/api/debug", "/metrics", "/prometheus"]
     exposed = []
     for path in debug_paths:
         try:
-            response = requests.get(base_url + path, timeout=3)
+            response = requests.get(base_url + path, headers=headers, timeout=3)
             if response.status_code != 404:
                 exposed.append(f"{path} (HTTP {response.status_code})")
         except requests.RequestException:
@@ -650,7 +668,7 @@ def scan_target_misconfigurations(target_url: str = "") -> str:
         findings.append("**Potential Exposed Endpoints:** none detected\n")
 
     try:
-        response = requests.options(base_url, headers={"Origin": "https://attacker.example.com"}, timeout=3)
+        response = requests.options(base_url, headers=headers, timeout=3)
         cors_origin = response.headers.get("Access-Control-Allow-Origin")
         if cors_origin:
             findings.append(f"**CORS Origin:** {cors_origin}\n")
@@ -982,9 +1000,9 @@ def promptfoo_tool(prompts_text: str) -> str:
         return "Promptfoo execution aborted: no prompts were provided in prompts_text."
 
     # Never send attack traffic if the target service is already down.
-    health_url = _build_health_url(TARGET_CHAT_URL)
+    health_url = TARGET_HEALTH_URL
     try:
-        health_response = requests.get(health_url, timeout=5)
+        health_response = requests.get(health_url, headers=_target_headers(), timeout=5)
         health_response.raise_for_status()
     except requests.RequestException as e:
         return (
@@ -1018,7 +1036,7 @@ def promptfoo_tool(prompts_text: str) -> str:
                     job_url = _build_job_url(TARGET_CHAT_URL, job_id)
                     started_at = time.time()
                     while time.time() - started_at < job_timeout:
-                        status_response = requests.get(job_url, timeout=per_request_timeout)
+                        status_response = requests.get(job_url, headers=_target_headers(), timeout=per_request_timeout)
                         job_data = status_response.json()
                         if job_data.get("status") in {"finished", "failed"}:
                             break
@@ -1052,7 +1070,7 @@ def promptfoo_tool(prompts_text: str) -> str:
             "config": {
                 "url": TARGET_CHAT_URL,
                 "method": "POST",
-                "headers": {"Content-Type": "application/json"},
+                "headers": _target_headers({"Content-Type": "application/json"}),
                 "body": _build_request_payload("{{prompt}}")
             }
         }]
@@ -1137,7 +1155,7 @@ def pyrit_tool(prompts_text: str) -> str:
             prompt_text = prompt_request.request_pieces[0].original_value
             async with aiohttp.ClientSession() as session:
                 payload = {{"message": prompt_text}}
-                async with session.post(self.endpoint, json=payload) as resp:
+                async with session.post(self.endpoint, json=payload, headers={json.dumps(_target_headers())}) as resp:
                     result = await resp.json()
                     print(f"\\n[PyRIT Payload]: {{prompt_text}}")
                     print(f"[Agent Response]: {{result.get('response', 'Error')}}")

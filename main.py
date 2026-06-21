@@ -22,8 +22,10 @@ load_dotenv()
 from crewai import Crew, Process
 from src.agents import RedTeamingAgents
 from src.tasks import RedTeamingTasks
+from src.target_profiles import get_target_health_url, get_target_chat_url, get_target_auth_token
 
-TARGET_CHAT_URL = os.getenv("TARGET_CHAT_URL", "http://127.0.0.1:8000/chat")
+TARGET_CHAT_URL = get_target_chat_url()
+TARGET_HEALTH_URL = get_target_health_url()
 REPORT_FORMAT = os.getenv("REPORT_FORMAT", "pdf_default").strip().lower()
 
 REPORT_STYLES = {
@@ -49,20 +51,29 @@ def validate_runtime() -> None:
     """Check the prerequisites that the crew depends on before any work starts.
 
     Two external dependencies matter here:
-    - `ARIADNE_API_TOKEN` so the custom LLM wrapper can reach the API.
+    - The configured LLM backend token so the custom LLM wrapper can reach the API.
     - A reachable target chatbot so the crew has a service to test.
 
     Failing fast here keeps the later agent steps from producing confusing errors
     that are really just environment setup problems.
     """
     missing = []
-    if not os.getenv("ARIADNE_API_TOKEN"):
-        missing.append("ARIADNE_API_TOKEN")
+    llm_backend = os.getenv("LLM_BACKEND", "openrouter").strip().lower()
+    if llm_backend == "ariadne":
+        if not os.getenv("ARIADNE_API_TOKEN"):
+            missing.append("ARIADNE_API_TOKEN")
+    else:
+        if not os.getenv("OPENROUTER_API_KEY"):
+            missing.append("OPENROUTER_API_KEY")
+
+    target_auth = get_target_auth_token()
+    if os.getenv("TARGET_APP", "generic").strip().lower() == "zero_health" and not target_auth:
+        missing.append("TARGET_AUTH_TOKEN (or ZERO_HEALTH_JWT)")
 
     if missing:
         raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
 
-    health_url = _build_health_url(TARGET_CHAT_URL)
+    health_url = TARGET_HEALTH_URL
     try:
         response = requests.get(health_url, timeout=5)
         response.raise_for_status()
@@ -145,8 +156,8 @@ def main():
     about the system: capture the target, validate the environment, create the
     planner/executor/reporter roles, execute the crew, and export the result.
     """
+    
     print("🛡️ Welcome to the CrewAI Red Teaming Agent 🛡️")
-
     parser = argparse.ArgumentParser(description="Run the local red-teaming crew")
     parser.add_argument("--target", dest="target_prompt", help="Target description for the planner")
     args = parser.parse_args()

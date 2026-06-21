@@ -78,3 +78,24 @@ Notes:
 - If you enable `OPENROUTER_REASONING_ENABLED`, the wrapper will request reasoning tokens and the model may spend more internal compute before producing the final answer. This can increase latency but improve problem-solving for hard puzzles.
 - `LLM_MAX_TOKENS` should be set according to the task; `gpt-oss-120b` supports very long outputs but this increases runtime and memory usage on the provider side.
 - Streaming (`stream: true`) is supported by OpenRouter; for interactive streaming reliably consider using the official OpenRouter SDK. The lightweight wrapper included in `src/openrouter_llm.py` is focused on synchronous calls.
+
+## Switching Targets
+
+Use `TARGET_APP` to switch the workflow from the generic chatbot path to Zero-Health without editing code.
+
+### Zero-Health profile
+
+```powershell
+$env:TARGET_APP="zero_health"
+$env:TARGET_AUTH_TOKEN="<your-zero-health-jwt>"
+$env:TARGET_CHAT_URL="http://localhost:5000/api/chatbot/chat"
+$env:TARGET_HEALTH_URL="http://localhost:5000/api/health"
+$env:TARGET_HISTORY_URL="http://localhost:5000/api/chatbot/history"
+$env:TARGET_ENHANCED_CHAT_URL="http://localhost:5000/api/chatbot/enhanced-chat"
+```
+
+Notes:
+- Zero-Health uses bearer auth, so the chatbot requests must include a valid JWT in `TARGET_AUTH_TOKEN`.
+- The default request body field is `message`, which matches the Zero-Health `/api/chatbot/chat` contract.
+- If you want to probe the injection-friendly endpoint instead, point `TARGET_CHAT_URL` at `/api/chatbot/enhanced-chat` or set `TARGET_ENHANCED_CHAT_URL` and use it in a custom run.
+- The current code sends the auth token automatically in `Authorization: Bearer ...` for the Zero-Health profile.
