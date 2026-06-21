@@ -21,6 +21,7 @@ from src.tools import load_skill, gandalf_executor, gandalf_level_executor, gand
 from src.tools import detect_definition_clue, definition_lookup_tool
 from src.ariadne_llm import AriadneLLM
 from src.openrouter_llm import OpenRouterLLM
+from src.planner import Planner
 
 # Select the LLM backend via environment variable `LLM_BACKEND`.
 # Supported values: "openrouter", "ariadne". Default: "openrouter".
@@ -120,3 +121,7 @@ class RedTeamingAgents:
             llm=llm,
             verbose=VERBOSE
         )
+
+    def adaptive_planner(self):
+        """Instantiate and return a Planner for adaptive prompt generation."""
+        return Planner()

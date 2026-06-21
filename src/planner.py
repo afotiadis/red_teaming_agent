@@ -38,17 +38,28 @@ class Planner:
         return [h["prompt"] for h in self.history if "success" in h["status"].lower() or "200" in h["status"]]
 
     def next_prompt(self) -> str:
-        """Select the next prompt.
-        * If we have successful prompts, pick one at random and fuzz it.
-        * Otherwise pick a fresh base prompt at random.
+        """Select a set of prompts for the next attack.
+        * Prefer prompts that previously succeeded.
+        * Fill the remainder with fresh base prompts.
+        * Apply light fuzzing to each prompt.
+        * Return a pipe‑delimited string of **N** prompts (default 5).
         """
-        good = self._successful_prompts()
-        if good:
-            base = random.choice(good)
-        else:
-            base = random.choice(self.base_prompts)
-        # Simple fuzz: random whitespace variations and case swapping.
-        return self._fuzz_prompt(base)
+        # Number of prompts to generate per run – can be tuned later
+        num_prompts = 5
+        prompts: List[str] = []
+        # Gather candidates: successful history + base prompts (unique)
+        candidates = list(set(self._successful_prompts() + self.base_prompts))
+        # Ensure we have enough candidates; if not, fallback to base list repeatedly
+        while len(prompts) < num_prompts:
+            if not candidates:
+                candidates = self.base_prompts[:]
+            choice = random.choice(candidates)
+            # Remove to avoid immediate duplicate in this run
+            if choice in candidates:
+                candidates.remove(choice)
+            prompts.append(self._fuzz_prompt(choice))
+        # Pipe‑delimited string for the executor
+        return "|".join(prompts)
 
     def _fuzz_prompt(self, prompt: str) -> str:
         """Create a lightly mutated version of the prompt.

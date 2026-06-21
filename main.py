@@ -11,6 +11,7 @@ to start when learning the project structure.
 import os
 import sys
 import argparse
+import time
 import json
 import markdown
 import requests
@@ -179,8 +180,12 @@ def main():
     executor = agents.executor_agent()
     reporter = agents.reporter_agent()
 
+    # Adaptive planner instance for generating dynamic prompts
+    planner_util = agents.adaptive_planner()
+    print(f"[Adaptive Planner] Next prompt preview: {planner_util.next_prompt()}", flush=True)
+    
     # Each task consumes the output of the previous step.
-    plan_task = tasks.plan_attack(planner, target_prompt)
+    plan_task = tasks.plan_attack(planner, target_prompt, planner_util)
     execute_task = tasks.execute_and_report(executor)
     report_task = tasks.generate_pdf_report(reporter)
 
@@ -190,10 +195,21 @@ def main():
         tasks=[plan_task, execute_task, report_task],
         process=Process.sequential
     )
-
+    
     print("\n🚀 Initiating Attack Sequence...\n")
+    start_time = time.time()
     result = red_team_crew.kickoff()
-
+    latency = time.time() - start_time
+    # Record the planner usage (simple placeholder info)
+    try:
+        planner_util.record(
+            prompt="[captured via plan_attack]",
+            status="completed",
+            latency=latency,
+            raw_response=str(result)
+        )
+    except Exception as e:
+        print(f"[Planner] Recording failed: {e}")
     print("\n" + "="*50)
     print("📝 ATTACK COMPLETE. GENERATING REPORT...")
     print("="*50)

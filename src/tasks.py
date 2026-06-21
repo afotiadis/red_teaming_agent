@@ -14,7 +14,24 @@ import json
 class RedTeamingTasks:
     """Factory for the sequential tasks that drive the crew."""
 
-    def plan_attack(self, agent, target_prompt):
+    def plan_attack(self, agent, target_prompt, planner):
+        """Ask the adaptive planner to generate a prompt list for the target.
+
+        The planner returns a pipe‑delimited string of prompts. This method wraps the
+        result in the JSON schema expected by the executor agent.
+        """
+        # Obtain a generated prompt (or a set of prompts) from the planner.
+        generated = planner.next_prompt()
+        # Build the JSON payload for the executor.
+        payload = json.dumps({
+            "tool": "execute_promptfoo_attack",
+            "prompts_text": generated
+        })
+        return Task(
+            description=payload,
+            expected_output='Valid JSON with a tool field and a pipe-delimited prompts_text field.',
+            agent=agent
+        )
         """Ask the planner to turn the target description into structured JSON.
 
         The output shape is intentionally strict so the executor can parse it
