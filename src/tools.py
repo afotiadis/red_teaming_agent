@@ -294,7 +294,7 @@ def rag_search_knowledge(query: str) -> str:
 
 retriever, _retriever_error = _initialize_retriever()
 # Allow tests and lightweight runs to skip heavy RAG init by setting SKIP_RAG_INIT=1
-if os.getenv("SKIP_RAG_INIT", "0") == "0":
+if os.getenv("SKIP_RAG_INIT", "1") == "0":
     retriever, _retriever_error = None, "SKIP_RAG_INIT enabled"
 else:
     try:

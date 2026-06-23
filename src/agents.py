@@ -122,6 +122,10 @@ class RedTeamingAgents:
             verbose=VERBOSE
         )
 
-    def adaptive_planner(self):
-        """Instantiate and return a Planner for adaptive prompt generation."""
-        return Planner()
+    def adaptive_planner(self, base_prompt: str | None = None):
+        """Instantiate and return a Planner for adaptive prompt generation.
+
+        The optional *base_prompt* argument supplies the original user‑provided prompt
+        that will be combined with RAG knowledge inside the planner.
+        """
+        return Planner(base_prompt=base_prompt)

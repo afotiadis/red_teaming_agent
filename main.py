@@ -180,8 +180,8 @@ def main():
     executor = agents.executor_agent()
     reporter = agents.reporter_agent()
 
-    # Adaptive planner instance for generating dynamic prompts
-    planner_util = agents.adaptive_planner()
+    # Adaptive planner instance for generating dynamic prompts, seeded with the original target description
+    planner_util = agents.adaptive_planner(base_prompt=target_prompt)
     print(f"[Adaptive Planner] Next prompt preview: {planner_util.next_prompt()}", flush=True)
     
     # Each task consumes the output of the previous step.
