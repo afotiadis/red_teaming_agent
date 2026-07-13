@@ -26,6 +26,7 @@ from pathlib import Path
 import requests
 from crewai.tools import tool
 from langchain_chroma import Chroma
+from src.gandalf_utils import SEMANTIC_GUESS_CLUSTERS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from src.target_profiles import (
     build_target_headers,
@@ -59,7 +60,6 @@ GANDALF_SKILL_CANDIDATES = [
     "skills/gandalf/SKILL.md",
     "skills/gandalf-ctf/SKILL.md",
 ]
-
 ATTACK_STRATEGIES_PATH = os.getenv("ATTACK_STRATEGIES_PATH", os.path.join(PROJECT_ROOT, "config", "attack_strategies.json"))
 
 
@@ -201,6 +201,8 @@ def _build_promptfoo_command(config_path: str) -> list[str]:
 
 RAG_FALLBACK_ROOTS = [
     Path(PROJECT_ROOT) / "data" / "repos",
+    Path(PROJECT_ROOT) / "data" / "attack_knowledge",
+    Path(PROJECT_ROOT) / "data" / "experiential_memory",
     Path(PROJECT_ROOT) / "skills",
 ]
 
@@ -402,26 +404,8 @@ def definition_lookup(definition_text: str, max_results: int = 5) -> list[str]:
     definition_lower = definition_text.lower()
     keywords = ["transmission", "energy", "wave", "signal", "growth", "potential", "tropical"]
     
-    # Pre-built semantic mappings (expanded for better coverage)
-    semantic_db = {
-        "transmission": ["wave", "signal", "light", "radiation", "beam", "pulse", "information", "energy", "wavelength"],
-        "wavelength": ["wave", "wavelength", "frequency", "electromagnetic", "light", "radiation", "transmission"],
-        "wave": ["wave", "wavelength", "signal", "light", "radiation", "frequency", "transmission"],
-        "growth": ["potential", "seed", "growth", "sprout", "sapling", "development", "future", "acorn", "capability", "capacity"],
-        "tropical": ["coconut", "pineapple", "mango", "tropical", "island", "beach", "exotic", "cocoloco"],
-        "rhythm": ["rhythm", "pattern", "beat", "tempo", "cadence", "pulse", "sound", "music"],
-        "energy": ["wave", "light", "radiation", "power", "force", "electricity", "kinetic", "transmission", "wavelength"],
-        "space": ["wave", "signal", "light", "radiation", "void", "vacuum", "transmission"],
-        "electromagnetic": ["wave", "signal", "light", "radiation", "wavelength", "frequency"],
-        "concept": ["idea", "meaning", "property", "category"],
-        # Enhanced growth domain keywords
-        "capable": ["potential", "capacity", "capability", "possible", "feasible"],
-        "becoming": ["potential", "growth", "development", "transformation", "change"],
-        "achieving": ["potential", "capability", "capacity", "achievement", "success"],
-        "future": ["potential", "possibility", "promise", "hope", "tomorrow"],
-        "opportunity": ["potential", "possibility", "chance", "opening"],
-        "promise": ["potential", "hope", "future", "vow"],
-    }
+    # Pre-built semantic mappings from shared utils
+    semantic_db = SEMANTIC_GUESS_CLUSTERS
     
     # Match keywords in definition to semantic clusters
     for keyword, words in semantic_db.items():

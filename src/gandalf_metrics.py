@@ -30,6 +30,7 @@ import re
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional, List, Dict, Any
+from src.gandalf_utils import _response_text
 
 
 @dataclass
@@ -268,7 +269,7 @@ def evaluate_game_run(results_json_path: str, real_passwords: Optional[Dict[int,
             if "response" in prompt_obj:
                 response = prompt_obj["response"]
                 # Extract any candidates that were mentioned
-                response_text = _extract_response_text(response)
+                response_text = _response_text(response)
                 candidates = _extract_guess_candidates(response_text)
                 
                 if candidates:
@@ -312,14 +313,7 @@ def evaluate_game_run(results_json_path: str, real_passwords: Optional[Dict[int,
     return metrics_by_level
 
 
-def _extract_response_text(payload) -> str:
-    """Extract human-readable response text from Gandalf API response."""
-    if isinstance(payload, dict):
-        for key in ("defender_response", "message", "response", "text", "output", "result"):
-            value = payload.get(key)
-            if value:
-                return str(value)
-    return str(payload)
+
 
 
 def _extract_guess_candidates(response_text: str) -> List[str]:

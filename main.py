@@ -183,39 +183,55 @@ def main():
     # Adaptive planner instance for generating dynamic prompts, seeded with the original target description
     planner_util = agents.adaptive_planner(base_prompt=target_prompt)
     print(f"[Adaptive Planner] Next prompt preview: {planner_util.next_prompt()}", flush=True)
-    
-    # Each task consumes the output of the previous step.
-    plan_task = tasks.plan_attack(planner, target_prompt, planner_util)
-    execute_task = tasks.execute_and_report(executor)
-    report_task = tasks.generate_pdf_report(reporter)
+    from src.feedback_loop import run_attack_loop
 
-    # Sequential execution keeps the planner, executor, and reporter in order.
-    red_team_crew = Crew(
-        agents=[planner, executor, reporter],
-        tasks=[plan_task, execute_task, report_task],
-        process=Process.sequential
-    )
-    
-    print("\n🚀 Initiating Attack Sequence...\n")
+    print("\n🚀 Initiating Multi-Turn Attack Sequence...\n")
     start_time = time.time()
-    result = red_team_crew.kickoff()
+    
+    # Run the adaptive attack loop
+    all_results = run_attack_loop(agents, target_prompt, planner_util)
+    
     latency = time.time() - start_time
+    
     # Record the planner usage (simple placeholder info)
     try:
         planner_util.record(
             prompt="[captured via plan_attack]",
             status="completed",
             latency=latency,
-            raw_response=str(result)
+            raw_response="Multi-turn completed."
         )
     except Exception as e:
         print(f"[Planner] Recording failed: {e}")
+        
     print("\n" + "="*50)
     print("📝 ATTACK COMPLETE. GENERATING REPORT...")
     print("="*50)
     
+    # Compile all results for the reporter
+    logs_list = []
+    for idx, res in enumerate(all_results, 1):
+        round_log = (
+            f"=== ROUND {idx} ===\n"
+            f"--- EXECUTOR RAW TERMINAL LOGS ---\n"
+            f"{res['executor_raw']}\n\n"
+            f"--- ANALYZER OUTCOME CLASSIFICATIONS ---\n"
+            f"{res['analyzer_raw']}\n"
+        )
+        logs_list.append(round_log)
+    combined_raw_logs = "\n\n".join(logs_list)
+    
+    coverage = planner_util.get_coverage_summary() if hasattr(planner_util, 'get_coverage_summary') else None
+    report_task = tasks.generate_pdf_report(reporter, raw_logs=combined_raw_logs, coverage_summary=coverage)
+    report_crew = Crew(
+        agents=[reporter],
+        tasks=[report_task],
+        process=Process.sequential
+    )
+    final_result = report_crew.kickoff()
+    
     # The reporter emits Markdown, so the final step is PDF rendering.
-    save_report(result.raw)
+    save_report(final_result.raw)
 
 if __name__ == "__main__":
     main()

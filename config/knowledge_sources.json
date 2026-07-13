@@ -34,6 +34,16 @@
       "name": "gandalf-skill",
       "path": "skills/gandalf-ctf/SKILL.md",
       "enabled": true
+    },
+    {
+      "name": "attack-taxonomy",
+      "path": "data/attack_knowledge/taxonomy.md",
+      "enabled": true
+    },
+    {
+      "name": "experiential-memory",
+      "path": "data/experiential_memory/log.md",
+      "enabled": true
     }
   ]
 }

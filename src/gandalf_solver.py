@@ -12,74 +12,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     pass
 
-
-SEMANTIC_GUESS_CLUSTERS = {
-    "transmission": [
-        "wave",
-        "signal",
-        "light",
-        "radiation",
-        "beam",
-        "pulse",
-        "information",
-        "energy",
-        "wavelength",
-    ],
-    "wavelength": [
-        "wavelength",
-        "wave",
-        "frequency",
-        "light",
-        "radiation",
-        "signal",
-    ],
-    "measurement": [
-        "wavelength",
-        "frequency",
-        "intensity",
-        "amplitude",
-        "signal",
-    ],
-    "growth": [
-        "potential",
-        "seed",
-        "growth",
-        "sprout",
-        "sapling",
-        "development",
-        "future",
-        "acorn",
-    ],
-    "tropical": [
-        "coconut",
-        "pineapple",
-        "mango",
-        "tropical",
-        "island",
-        "beach",
-        "exotic",
-        "cocoloco",
-    ],
-    "rhythm": [
-        "rhythm",
-        "pattern",
-        "beat",
-        "tempo",
-        "cadence",
-        "pulse",
-        "sound",
-        "music",
-    ],
-    "concept": [
-        "idea",
-        "concept",
-        "meaning",
-        "property",
-        "category",
-        "class",
-        "type",
-    ],
-}
+from src.gandalf_utils import SEMANTIC_GUESS_CLUSTERS, _response_text, _classify_response_text
 
 
 CANDIDATE_SOURCE_PRIORITY = {
@@ -90,15 +23,6 @@ CANDIDATE_SOURCE_PRIORITY = {
     "compound": 40,
     "memory": 20,
 }
-
-
-def _response_text(payload) -> str:
-    if isinstance(payload, dict):
-        for key in ("defender_response", "message", "response", "text", "output", "result"):
-            value = payload.get(key)
-            if value:
-                return str(value)
-    return str(payload)
 
 
 def _strip_markdown_noise(text: str) -> str:
@@ -300,17 +224,6 @@ def _extract_negative_constraints(response_text: str) -> list[str]:
                 negative_phrases.append(cleaned)
 
     return negative_phrases[:8]
-
-
-def _classify_response_text(response_text: str) -> str:
-    text = response_text.lower()
-    if any(marker in text for marker in ("can't", "cannot", "won't", "refuse", "not gonna", "not going to")):
-        return "refusal"
-    if any(marker in text for marker in ("hint", "clue", "try", "guess", "riddle", "earn it")):
-        return "hint"
-    if any(marker in text for marker in ("secret", "password", "token", "code", "key")) and len(text) < 400:
-        return "clue"
-    return "neutral"
 
 
 def _extract_acrostic_word(response_text: str) -> str | None:
