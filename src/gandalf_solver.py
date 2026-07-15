@@ -6,6 +6,8 @@ main game loop can stay focused on registration, prompting, and level flow.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import re
 from typing import TYPE_CHECKING
 
@@ -163,6 +165,93 @@ def _decode_a1z26_sequences(response_text: str) -> list[str]:
     return decoded_candidates
 
 
+def _decode_hex_sequences(response_text: str) -> list[str]:
+    if not response_text:
+        return []
+
+    candidates: list[str] = []
+    patterns = [
+        r"(?:hex|hexadecimal)\s*(?:is|:)?\s*((?:0x)?[0-9a-fA-F]{2}(?:[\s,\-]+(?:0x)?[0-9a-fA-F]{2}){2,})",
+        r"\b((?:0x[0-9a-fA-F]{2}[\s,\-]*){4,})\b",
+    ]
+
+    for pattern in patterns:
+        for match in re.findall(pattern, response_text, flags=re.IGNORECASE):
+            cleaned = re.sub(r"0x", "", match, flags=re.IGNORECASE)
+            cleaned = re.sub(r"[^0-9a-fA-F]", "", cleaned)
+            if len(cleaned) < 8 or len(cleaned) % 2 != 0:
+                continue
+            try:
+                decoded = bytes.fromhex(cleaned).decode("utf-8", errors="ignore")
+            except ValueError:
+                continue
+            token = re.sub(r"[^A-Za-z0-9_-]", "", decoded)
+            if len(token) >= 4:
+                candidates.append(token)
+
+    return candidates
+
+
+def _decode_base64_sequences(response_text: str) -> list[str]:
+    if not response_text:
+        return []
+
+    candidates: list[str] = []
+    patterns = [
+        r"(?:base64|b64)\s*(?:is|:)?\s*([A-Za-z0-9+/]{8,}={0,2})",
+        r"\b([A-Za-z0-9+/]{12,}={0,2})\b",
+    ]
+
+    for pattern in patterns:
+        for match in re.findall(pattern, response_text, flags=re.IGNORECASE):
+            try:
+                decoded = base64.b64decode(match, validate=True).decode("utf-8", errors="ignore")
+            except (binascii.Error, ValueError):
+                continue
+            token = re.sub(r"[^A-Za-z0-9_-]", "", decoded)
+            if len(token) >= 4 and re.search(r"[A-Za-z]", token):
+                candidates.append(token)
+
+    return candidates
+
+
+def _decode_spaced_letters(response_text: str) -> list[str]:
+    if not response_text:
+        return []
+
+    candidates: list[str] = []
+    patterns = [
+        r"(?:letters?|spelled|characters?)\s*(?:are|is|:)?\s*((?:[A-Za-z][\s\.\-_,|/]+){3,}[A-Za-z])",
+        r"\b((?:[A-Z][\s\.\-_,|/]+){3,}[A-Z])\b",
+    ]
+
+    for pattern in patterns:
+        for match in re.findall(pattern, response_text):
+            token = re.sub(r"[^A-Za-z]", "", match)
+            if 4 <= len(token) <= 24:
+                candidates.append(token)
+
+    return candidates
+
+
+def _repair_common_leetspeak(candidate: str) -> list[str]:
+    if not candidate or not re.search(r"[013457]", candidate):
+        return []
+
+    translation = str.maketrans({
+        "0": "O",
+        "1": "I",
+        "3": "E",
+        "4": "A",
+        "5": "S",
+        "7": "T",
+    })
+    repaired = candidate.translate(translation)
+    if repaired != candidate and re.search(r"[A-Za-z]", repaired):
+        return [repaired]
+    return []
+
+
 def _decode_reversed_text(response_text: str) -> list[str]:
     if not response_text:
         return []
@@ -296,7 +385,12 @@ def _parse_clue_state(defender_response) -> dict:
 
     decoded_candidates: list[str] = []
     decoded_candidates.extend(_decode_a1z26_sequences(response_text))
+    decoded_candidates.extend(_decode_hex_sequences(response_text))
+    decoded_candidates.extend(_decode_base64_sequences(response_text))
+    decoded_candidates.extend(_decode_spaced_letters(response_text))
     decoded_candidates.extend(_decode_reversed_text(response_text))
+    for direct_candidate in clue_state["direct_candidates"]:
+        decoded_candidates.extend(_repair_common_leetspeak(direct_candidate))
 
     seen_candidates = set()
     for candidate in decoded_candidates:
