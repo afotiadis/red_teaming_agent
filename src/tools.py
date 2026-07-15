@@ -65,24 +65,63 @@ ATTACK_STRATEGIES_PATH = os.getenv("ATTACK_STRATEGIES_PATH", os.path.join(PROJEC
 
 DEFAULT_ATTACK_STRATEGY = {
     "inter_prompt_delay": float(os.getenv("INTER_PROMPT_DELAY", "0.5")),
+    "connect_timeout": int(os.getenv("ATTACK_CONNECT_TIMEOUT", "5")),
     "request_timeout": int(os.getenv("ATTACK_REQUEST_TIMEOUT", "15")),
     "poll_interval": float(os.getenv("ATTACK_JOB_POLL_INTERVAL", "0.5")),
     "job_timeout": int(os.getenv("ATTACK_JOB_TIMEOUT", "120")),
+    "max_retries": int(os.getenv("ATTACK_MAX_RETRIES", "0")),
+    "retry_timeout_multiplier": float(os.getenv("ATTACK_RETRY_TIMEOUT_MULTIPLIER", "1.5")),
+    "retry_backoff": float(os.getenv("ATTACK_RETRY_BACKOFF", "5")),
+    "consecutive_timeout_threshold": int(os.getenv("ATTACK_TIMEOUT_THRESHOLD", "2")),
+    "timeout_cooldown": float(os.getenv("ATTACK_TIMEOUT_COOLDOWN", "20")),
+    "health_check_timeout": int(os.getenv("ATTACK_HEALTH_CHECK_TIMEOUT", "5")),
+    "retry_action_prompts": os.getenv("ATTACK_RETRY_ACTION_PROMPTS", "false").lower() == "true",
 }
 
 
 def _load_attack_strategy() -> dict:
     """Load the selected attack pacing profile from disk, with env defaults."""
-    strategy_name = os.getenv("ATTACK_STRATEGY", "local_fast")
+    default_strategy_name = "zero_health" if TARGET_APP == "zero_health" else "local_fast"
+    strategy_name = os.getenv("ATTACK_STRATEGY", default_strategy_name)
     try:
         with open(ATTACK_STRATEGIES_PATH, "r", encoding="utf-8") as strategy_file:
             strategies = json.load(strategy_file)
-        return strategies.get(strategy_name, DEFAULT_ATTACK_STRATEGY)
+        selected_strategy = strategies.get(strategy_name, {})
+        return {**DEFAULT_ATTACK_STRATEGY, **selected_strategy, "name": strategy_name}
     except Exception:
-        return DEFAULT_ATTACK_STRATEGY
+        return {**DEFAULT_ATTACK_STRATEGY, "name": strategy_name}
 
 
 ATTACK_STRATEGY = _load_attack_strategy()
+
+
+STATE_CHANGING_PROMPT_PATTERN = re.compile(
+    r"\b(book|schedule|cancel|reschedule|create|update|delete|modify|send|email|sms|export|"
+    r"grant|revoke|disable|enable|execute|run)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_potentially_state_changing_prompt(prompt: str) -> bool:
+    """Return True when retrying a timed-out prompt could repeat a side effect."""
+    return bool(STATE_CHANGING_PROMPT_PATTERN.search(prompt or ""))
+
+
+def _safe_response_body(response) -> object:
+    """Return JSON when available and preserve non-JSON error bodies otherwise."""
+    try:
+        return response.json()
+    except (ValueError, requests.exceptions.JSONDecodeError):
+        return {"raw_text": response.text}
+
+
+def _probe_target_health(session: requests.Session, timeout: int) -> dict:
+    """Check whether the target recovered without aborting the attack run."""
+    try:
+        response = session.get(TARGET_HEALTH_URL, headers=_target_headers(), timeout=timeout)
+        return {"reachable": True, "status_code": response.status_code}
+    except requests.RequestException as exc:
+        return {"reachable": False, "error": str(exc)}
 
 
 def _target_headers(extra_headers: dict | None = None) -> dict:
@@ -294,9 +333,9 @@ def rag_search_knowledge(query: str) -> str:
     return f"Error: Chroma DB not available and fallback search found no matches. {_retriever_error or 'unknown error'}"
 
 
-retriever, _retriever_error = _initialize_retriever()
-# Allow tests and lightweight runs to skip heavy RAG init by setting SKIP_RAG_INIT=1
-if os.getenv("SKIP_RAG_INIT", "1") == "0":
+# Allow tests and lightweight runs to skip heavy RAG init by setting SKIP_RAG_INIT=1.
+# Normal runs preserve the existing behavior and initialize the vector store.
+if os.getenv("SKIP_RAG_INIT", "0") == "1":
     retriever, _retriever_error = None, "SKIP_RAG_INIT enabled"
 else:
     try:
@@ -1000,46 +1039,166 @@ def promptfoo_tool(prompts_text: str) -> str:
     if not use_promptfoo:
         # Direct mode keeps control inside Python and makes each request easier to trace.
         delay = float(ATTACK_STRATEGY.get("inter_prompt_delay", DEFAULT_ATTACK_STRATEGY["inter_prompt_delay"]))
+        connect_timeout = int(ATTACK_STRATEGY.get("connect_timeout", DEFAULT_ATTACK_STRATEGY["connect_timeout"]))
         per_request_timeout = int(ATTACK_STRATEGY.get("request_timeout", DEFAULT_ATTACK_STRATEGY["request_timeout"]))
         poll_interval = float(ATTACK_STRATEGY.get("poll_interval", DEFAULT_ATTACK_STRATEGY["poll_interval"]))
         job_timeout = int(ATTACK_STRATEGY.get("job_timeout", DEFAULT_ATTACK_STRATEGY["job_timeout"]))
+        max_retries = int(ATTACK_STRATEGY.get("max_retries", DEFAULT_ATTACK_STRATEGY["max_retries"]))
+        timeout_multiplier = float(ATTACK_STRATEGY.get("retry_timeout_multiplier", DEFAULT_ATTACK_STRATEGY["retry_timeout_multiplier"]))
+        retry_backoff = float(ATTACK_STRATEGY.get("retry_backoff", DEFAULT_ATTACK_STRATEGY["retry_backoff"]))
+        timeout_threshold = int(ATTACK_STRATEGY.get("consecutive_timeout_threshold", DEFAULT_ATTACK_STRATEGY["consecutive_timeout_threshold"]))
+        timeout_cooldown = float(ATTACK_STRATEGY.get("timeout_cooldown", DEFAULT_ATTACK_STRATEGY["timeout_cooldown"]))
+        health_check_timeout = int(ATTACK_STRATEGY.get("health_check_timeout", DEFAULT_ATTACK_STRATEGY["health_check_timeout"]))
+        retry_action_prompts = bool(ATTACK_STRATEGY.get("retry_action_prompts", DEFAULT_ATTACK_STRATEGY["retry_action_prompts"]))
 
-        print(f"--> [Promptfoo-Mode] Posting {len(malicious_prompts)} prompts sequentially with {delay}s delay to {TARGET_CHAT_URL}")
+        print(
+            f"--> [Promptfoo-Mode] Strategy={ATTACK_STRATEGY.get('name', 'custom')}; "
+            f"posting {len(malicious_prompts)} prompts sequentially with {delay}s delay, "
+            f"{per_request_timeout}s read timeout, and up to {max_retries} retry/retries to {TARGET_CHAT_URL}"
+        )
         results = []
-        for idx, p in enumerate(malicious_prompts, start=1):
-            try:
-                # The target accepts a message, queues it, and returns a job id.
+        consecutive_timed_out_prompts = 0
+
+        with requests.Session() as session:
+            for idx, p in enumerate(malicious_prompts, start=1):
                 request_kwargs = _build_request_kwargs(p)
-                r = requests.post(TARGET_CHAT_URL, timeout=per_request_timeout, **request_kwargs)
-                response_body = r.json()
-                job_id = response_body.get("job_id")
-                job_data = response_body
+                state_changing = _is_potentially_state_changing_prompt(p)
+                allowed_retries = max_retries if retry_action_prompts or not state_changing else 0
+                attempts = []
+                final_entry = None
 
-                if job_id:
-                    # Poll the job endpoint until the background worker finishes.
-                    job_url = _build_job_url(TARGET_CHAT_URL, job_id)
-                    started_at = time.time()
-                    while time.time() - started_at < job_timeout:
-                        status_response = requests.get(job_url, headers=_target_headers(), timeout=per_request_timeout)
-                        job_data = status_response.json()
-                        if job_data.get("status") in {"finished", "failed"}:
-                            break
-                        time.sleep(poll_interval)
+                for attempt_index in range(allowed_retries + 1):
+                    attempt_number = attempt_index + 1
+                    read_timeout = max(1, round(per_request_timeout * (timeout_multiplier ** attempt_index)))
+                    try:
+                        # A timeout tuple keeps connection failures distinct from slow target processing.
+                        response = session.post(
+                            TARGET_CHAT_URL,
+                            timeout=(connect_timeout, read_timeout),
+                            **request_kwargs,
+                        )
+                        response_body = _safe_response_body(response)
+                        job_id = response_body.get("job_id") if isinstance(response_body, dict) else None
+                        job_data = response_body
 
-                entry = {
-                    "prompt_index": idx,
-                    "prompt": p,
-                    "status_code": r.status_code,
-                    "response": job_data,
-                }
-                print(f"--> [Promptfoo-Mode] Sent prompt {idx}/{len(malicious_prompts)}: status={r.status_code}")
-                results.append(entry)
-            except requests.RequestException as e:
-                results.append({"prompt_index": idx, "prompt": p, "error": str(e)})
-                print(f"--> [Promptfoo-Mode] Error sending prompt {idx}: {str(e)}")
-            # Throttle
-            if idx < len(malicious_prompts):
-                time.sleep(delay)
+                        if job_id:
+                            # Poll an accepted job without resubmitting it, avoiding duplicate actions.
+                            job_url = _build_job_url(TARGET_CHAT_URL, job_id)
+                            started_at = time.time()
+                            while time.time() - started_at < job_timeout:
+                                try:
+                                    status_response = session.get(
+                                        job_url,
+                                        headers=_target_headers(),
+                                        timeout=(connect_timeout, read_timeout),
+                                    )
+                                except (requests.ReadTimeout, requests.ConnectTimeout) as poll_exc:
+                                    job_data = {
+                                        "job_id": job_id,
+                                        "status": "poll_timeout",
+                                        "outcome": "TIMEOUT_INCONCLUSIVE",
+                                        "error": str(poll_exc),
+                                    }
+                                    break
+                                job_data = _safe_response_body(status_response)
+                                if isinstance(job_data, dict) and job_data.get("status") in {"finished", "failed"}:
+                                    break
+                                time.sleep(poll_interval)
+
+                        attempts.append({
+                            "attempt": attempt_number,
+                            "read_timeout_seconds": read_timeout,
+                            "status_code": response.status_code,
+                        })
+                        final_entry = {
+                            "prompt_index": idx,
+                            "prompt": p,
+                            "status_code": response.status_code,
+                            "response": job_data,
+                            "attempts": attempts,
+                        }
+                        consecutive_timed_out_prompts = 0
+                        print(
+                            f"--> [Promptfoo-Mode] Sent prompt {idx}/{len(malicious_prompts)} "
+                            f"on attempt {attempt_number}: status={response.status_code}"
+                        )
+                        break
+                    except requests.ReadTimeout as exc:
+                        attempts.append({
+                            "attempt": attempt_number,
+                            "read_timeout_seconds": read_timeout,
+                            "error_type": "read_timeout",
+                            "error": str(exc),
+                        })
+                        if attempt_index < allowed_retries:
+                            backoff = retry_backoff * (2 ** attempt_index)
+                            print(
+                                f"--> [Promptfoo-Mode] Prompt {idx} timed out after {read_timeout}s; "
+                                f"waiting {backoff}s before retry {attempt_number + 1}."
+                            )
+                            time.sleep(backoff)
+                            attempts[-1]["health_check"] = _probe_target_health(session, health_check_timeout)
+                            continue
+
+                        final_entry = {
+                            "prompt_index": idx,
+                            "prompt": p,
+                            "error": str(exc),
+                            "error_type": "read_timeout",
+                            "outcome": "TIMEOUT_INCONCLUSIVE",
+                            "attempts": attempts,
+                        }
+                        if state_changing and not retry_action_prompts:
+                            final_entry["retry_skipped_reason"] = (
+                                "Prompt may change server state; automatic retry could duplicate an action."
+                            )
+                        consecutive_timed_out_prompts += 1
+                        print(f"--> [Promptfoo-Mode] Prompt {idx} exhausted its timeout attempts.")
+                    except requests.ConnectTimeout as exc:
+                        final_entry = {
+                            "prompt_index": idx,
+                            "prompt": p,
+                            "error": str(exc),
+                            "error_type": "connect_timeout",
+                            "outcome": "TIMEOUT_INCONCLUSIVE",
+                            "attempts": attempts + [{
+                                "attempt": attempt_number,
+                                "connect_timeout_seconds": connect_timeout,
+                                "error_type": "connect_timeout",
+                                "error": str(exc),
+                            }],
+                        }
+                        consecutive_timed_out_prompts += 1
+                        print(f"--> [Promptfoo-Mode] Could not connect for prompt {idx}: {exc}")
+                        break
+                    except requests.RequestException as exc:
+                        final_entry = {
+                            "prompt_index": idx,
+                            "prompt": p,
+                            "error": str(exc),
+                            "error_type": "request_error",
+                            "outcome": "ERROR",
+                            "attempts": attempts,
+                        }
+                        consecutive_timed_out_prompts = 0
+                        print(f"--> [Promptfoo-Mode] Error sending prompt {idx}: {exc}")
+                        break
+
+                results.append(final_entry)
+
+                if timeout_threshold > 0 and consecutive_timed_out_prompts >= timeout_threshold:
+                    print(
+                        f"--> [Promptfoo-Mode] {consecutive_timed_out_prompts} consecutive prompts timed out; "
+                        f"cooling down for {timeout_cooldown}s."
+                    )
+                    time.sleep(timeout_cooldown)
+                    cooldown_health = _probe_target_health(session, health_check_timeout)
+                    results[-1]["post_cooldown_health_check"] = cooldown_health
+                    consecutive_timed_out_prompts = 0
+
+                # Throttle every request boundary so a timed-out server task gets recovery time too.
+                if idx < len(malicious_prompts):
+                    time.sleep(delay)
 
         return json.dumps({"target": TARGET_CHAT_URL, "results": results}, ensure_ascii=False, indent=2)
 

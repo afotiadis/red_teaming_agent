@@ -99,13 +99,17 @@ class AriadneLLM(BaseLLM):
                     
         # Failsafe for ReAct-style output: if the model starts writing an observation,
         # stop there so CrewAI can perform the tool call instead of the model narrating it.
-        failsafe_stops = ["\nObservation:", "Observation:", "Observation ", "\nObservation "]
-        for stop in failsafe_stops:
-            if stop in full_text:
-                full_text = full_text.split(stop)[0]
-                # Re-attach the marker so CrewAI can still detect the stopping point.
-                full_text += f"\n{stop.strip()}" 
-                break
+        from_agent = kwargs.get("from_agent")
+        agent_role = getattr(from_agent, "role", from_agent if isinstance(from_agent, str) else "")
+        is_reporter_call = "report" in str(agent_role).lower() or "auditor" in str(agent_role).lower()
+        if not is_reporter_call:
+            failsafe_stops = ["\nObservation:", "Observation:", "Observation ", "\nObservation "]
+            for stop in failsafe_stops:
+                if stop in full_text:
+                    full_text = full_text.split(stop)[0]
+                    # Re-attach the marker so CrewAI can still detect the stopping point.
+                    full_text += f"\n{stop.strip()}"
+                    break
             
         return full_text
 

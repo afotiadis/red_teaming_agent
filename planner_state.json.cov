@@ -1,6 +1,6 @@
 {
   "prompt_injection": "blocked",
   "jailbreak": "blocked",
-  "info_disclosure": "blocked",
-  "excessive_agency": "not_tested"
+  "info_disclosure": "in_progress",
+  "excessive_agency": "blocked"
 }

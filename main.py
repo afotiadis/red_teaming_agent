@@ -13,6 +13,10 @@ import sys
 import argparse
 import time
 import json
+import re
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
 import markdown
 import requests
 from xhtml2pdf import pisa
@@ -23,16 +27,18 @@ load_dotenv()
 from crewai import Crew, Process
 from src.agents import RedTeamingAgents
 from src.tasks import RedTeamingTasks
-from src.target_profiles import get_target_health_url, get_target_chat_url, get_target_auth_token
+from src.target_profiles import get_target_health_url, get_target_chat_url, get_target_auth_token, get_target_app
 
 TARGET_CHAT_URL = get_target_chat_url()
 TARGET_HEALTH_URL = get_target_health_url()
 REPORT_FORMAT = os.getenv("REPORT_FORMAT", "pdf_default").strip().lower()
+PROJECT_ROOT = Path(__file__).resolve().parent
+REPORT_OUTPUT_DIR = os.getenv("REPORT_OUTPUT_DIR", "reports")
 
 REPORT_STYLES = {
-    "pdf_default": {"kind": "pdf", "filename": "Red_Team_Report.pdf"},
-    "html_debug": {"kind": "html", "filename": "Red_Team_Report.html"},
-    "json_structured": {"kind": "json", "filename": "Red_Team_Report.json"},
+    "pdf_default": {"kind": "pdf", "extension": "pdf"},
+    "html_debug": {"kind": "html", "extension": "html"},
+    "json_structured": {"kind": "json", "extension": "json"},
 }
 
 
@@ -114,40 +120,251 @@ def _render_report_html(markdown_content: str) -> str:
     """
 
 
-def save_report(markdown_content, report_format: str = REPORT_FORMAT):
-    """Save the reporter output in the configured format."""
+def _extract_json_dict(raw_text: str, required_key: str | None = None) -> dict | None:
+    """Find a JSON object embedded in an agent's surrounding prose."""
+    raw_text = raw_text or ""
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", raw_text):
+        try:
+            candidate, _ = decoder.raw_decode(raw_text[match.start():])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict) and (required_key is None or required_key in candidate):
+            return candidate
+    return None
+
+
+def _markdown_fence(value, language: str = "text") -> str:
+    """Fence arbitrary evidence without breaking on backticks inside responses."""
+    if isinstance(value, str):
+        rendered = value
+    else:
+        rendered = json.dumps(value, ensure_ascii=False, indent=2)
+    longest_backticks = max((len(run) for run in re.findall(r"`+", rendered)), default=0)
+    fence = "`" * max(3, longest_backticks + 1)
+    return f"{fence}{language}\n{rendered}\n{fence}"
+
+
+def build_report_evidence(all_results: list) -> tuple[str, dict, list[str]]:
+    """Create complete transcripts and compact statistics without using an LLM."""
+    transcript_parts = []
+    evidence_markers = []
+    status_counts: dict[str, int] = {}
+    outcome_counts: dict[str, int] = {}
+    category_counts: dict[str, int] = {}
+    error_type_counts: dict[str, int] = {}
+    representative_errors = []
+    targets = set()
+    total_prompt_results = 0
+
+    for round_number, round_data in enumerate(all_results, 1):
+        executor_raw = str(round_data.get("executor_raw", ""))
+        analyzer_raw = str(round_data.get("analyzer_raw", ""))
+        executor_payload = _extract_json_dict(executor_raw, required_key="results")
+        analyzer_payload = _extract_json_dict(analyzer_raw, required_key="results")
+        executor_results = executor_payload.get("results", []) if executor_payload else []
+        analyzer_results = analyzer_payload.get("results", []) if analyzer_payload else []
+
+        if executor_payload and executor_payload.get("target"):
+            targets.add(str(executor_payload["target"]))
+
+        transcript_parts.append(f"### Round {round_number}")
+
+        if not isinstance(executor_results, list) or not executor_results:
+            marker = f"<!-- EVIDENCE:R{round_number}:RAW -->"
+            evidence_markers.append(marker)
+            transcript_parts.extend([
+                marker,
+                "Structured executor results could not be parsed; the complete raw executor evidence follows.",
+                _markdown_fence(executor_raw, "text"),
+            ])
+            continue
+
+        for result_index, result in enumerate(executor_results, 1):
+            if not isinstance(result, dict):
+                result = {"response": result}
+            prompt_index = result.get("prompt_index", result_index)
+            marker = f"<!-- EVIDENCE:R{round_number}:P{prompt_index} -->"
+            evidence_markers.append(marker)
+            total_prompt_results += 1
+
+            transcript_parts.extend([
+                marker,
+                f"#### Round {round_number}, Prompt {prompt_index}",
+                "**Payload Sent**",
+                _markdown_fence(str(result.get("prompt", "")), "text"),
+            ])
+
+            status_code = result.get("status_code")
+            if status_code is not None:
+                status_key = str(status_code)
+                status_counts[status_key] = status_counts.get(status_key, 0) + 1
+                transcript_parts.append(f"**HTTP Status:** `{status_code}`")
+
+            if "response" in result:
+                transcript_parts.extend([
+                    "**Target Response**",
+                    _markdown_fence(result["response"], "json" if not isinstance(result["response"], str) else "text"),
+                ])
+                if isinstance(result["response"], dict) and result["response"].get("error"):
+                    error_text = str(result["response"].get("details") or result["response"]["error"])
+                    if error_text not in representative_errors and len(representative_errors) < 5:
+                        representative_errors.append(error_text[:300])
+            else:
+                error_text = str(result.get("error", "No response was recorded."))
+                transcript_parts.extend(["**Target Error**", _markdown_fence(error_text, "text")])
+                if error_text not in representative_errors and len(representative_errors) < 5:
+                    representative_errors.append(error_text[:300])
+
+            error_type = result.get("error_type")
+            if error_type:
+                error_key = str(error_type)
+                error_type_counts[error_key] = error_type_counts.get(error_key, 0) + 1
+
+            if result.get("attempts"):
+                transcript_parts.extend(["**Request Attempts**", _markdown_fence(result["attempts"], "json")])
+            if result.get("retry_skipped_reason"):
+                transcript_parts.append(f"**Retry note:** {result['retry_skipped_reason']}")
+
+            analyzer_item = analyzer_results[result_index - 1] if result_index <= len(analyzer_results) else None
+            if isinstance(analyzer_item, dict):
+                outcome = str(analyzer_item.get("outcome", "UNKNOWN"))
+                category = str(analyzer_item.get("category", "unknown"))
+                outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
+                category_counts[category] = category_counts.get(category, 0) + 1
+                transcript_parts.append(f"**Analyzer Classification:** `{outcome}` (`{category}`)")
+
+    summary = {
+        "targets": sorted(targets),
+        "rounds_executed": len(all_results),
+        "total_prompt_results": total_prompt_results,
+        "http_status_counts": status_counts,
+        "analyzer_outcome_counts": outcome_counts,
+        "category_counts": category_counts,
+        "transport_error_counts": error_type_counts,
+        "representative_errors": representative_errors,
+    }
+    return "\n\n".join(transcript_parts), summary, evidence_markers
+
+
+def assemble_complete_report(narrative_markdown: str, transcripts: str) -> str:
+    """Insert deterministic transcripts before remediation recommendations."""
+    narrative = (narrative_markdown or "").strip()
+
+    # Discard any Section 4 the model generated despite its bounded task.
+    section_four = re.search(r"(?im)^#{1,6}\s*4(?:\.|\s)", narrative)
+    if section_four:
+        later_section_five = re.search(r"(?im)^#{1,6}\s*5(?:\.|\s)", narrative[section_four.start():])
+        if later_section_five:
+            five_start = section_four.start() + later_section_five.start()
+            narrative = narrative[:section_four.start()].rstrip() + "\n\n" + narrative[five_start:].lstrip()
+        else:
+            narrative = narrative[:section_four.start()].rstrip()
+
+    section_five = re.search(r"(?im)^#{1,6}\s*5(?:\.|\s)", narrative)
+    if not section_five:
+        raise RuntimeError("Reporter output is incomplete: Section 5 Remediation Recommendations is missing.")
+
+    analysis_sections = narrative[:section_five.start()].rstrip()
+    remediation_section = narrative[section_five.start():].lstrip()
+    return (
+        f"{analysis_sections}\n\n"
+        f"## 4. Detailed Attack Transcripts\n\n"
+        f"The following evidence was rendered deterministically from executor results; it was not regenerated by an LLM.\n\n"
+        f"{transcripts}\n\n"
+        f"{remediation_section}\n\n"
+        f"<!-- END OF REPORT -->\n"
+    )
+
+
+def validate_complete_report(report_markdown: str, evidence_markers: list[str]) -> None:
+    """Reject semantically truncated reports before creating an archival PDF."""
+    missing = []
+    for section_number in (1, 2, 3, 4, 5):
+        if not re.search(rf"(?im)^#{{1,6}}\s*{section_number}(?:\.|\s)", report_markdown):
+            missing.append(f"Section {section_number}")
+    for marker in evidence_markers:
+        if marker not in report_markdown:
+            missing.append(marker)
+    if "<!-- END OF REPORT -->" not in report_markdown:
+        missing.append("end-of-report marker")
+    if missing:
+        preview = ", ".join(missing[:10])
+        raise RuntimeError(f"Report completeness validation failed; missing: {preview}")
+
+
+def _resolve_report_output_dir(output_dir: str | os.PathLike | None = None) -> Path:
+    """Resolve report storage relative to the repository, not the launch shell."""
+    candidate = Path(output_dir or REPORT_OUTPUT_DIR).expanduser()
+    if not candidate.is_absolute():
+        candidate = PROJECT_ROOT / candidate
+    return candidate.resolve()
+
+
+def _safe_filename_component(value: str) -> str:
+    """Convert target/profile labels into portable filename components."""
+    normalized = re.sub(r"[^A-Za-z0-9_-]+", "_", value.strip().lower())
+    return normalized.strip("_") or "generic"
+
+
+def _build_unique_report_path(
+    report_style: dict,
+    output_dir: str | os.PathLike | None = None,
+    generated_at: datetime | None = None,
+) -> Path:
+    """Build a timestamped, collision-resistant path for one report artifact."""
+    generated_at = generated_at or datetime.now(timezone.utc)
+    if generated_at.tzinfo is None:
+        generated_at = generated_at.replace(tzinfo=timezone.utc)
+    timestamp = generated_at.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
+    target_slug = _safe_filename_component(get_target_app())
+    unique_suffix = uuid.uuid4().hex[:8]
+    filename = f"red_team_report_{target_slug}_{timestamp}_{unique_suffix}.{report_style['extension']}"
+    return _resolve_report_output_dir(output_dir) / filename
+
+
+def save_report(
+    markdown_content,
+    report_format: str = REPORT_FORMAT,
+    output_dir: str | os.PathLike | None = None,
+) -> Path:
+    """Save a uniquely named report and return its absolute path."""
     report_style = REPORT_STYLES.get(report_format, REPORT_STYLES["pdf_default"])
-    filename = report_style["filename"]
+    report_path = _build_unique_report_path(report_style, output_dir=output_dir)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
 
     if report_style["kind"] == "json":
-        print(f"\n📄 Saving structured JSON report to {filename}...")
+        print(f"\nSaving structured JSON report to {report_path.name}...")
         payload = {
             "report_format": report_format,
+            "report_path": str(report_path),
             "content_markdown": markdown_content,
             "content_html": markdown.markdown(markdown_content, extensions=['tables', 'fenced_code']),
         }
-        with open(filename, "w", encoding="utf-8") as report_file:
+        with report_path.open("x", encoding="utf-8") as report_file:
             json.dump(payload, report_file, ensure_ascii=False, indent=2)
-        print(f"✅ Success! Report saved as: {os.path.abspath(filename)}")
-        return
+        print(f"Success! Report saved as: {report_path}")
+        return report_path
 
     html_content = _render_report_html(markdown_content)
 
     if report_style["kind"] == "html":
-        print(f"\n📄 Saving HTML report to {filename}...")
-        with open(filename, "w", encoding="utf-8") as report_file:
+        print(f"\nSaving HTML report to {report_path.name}...")
+        with report_path.open("x", encoding="utf-8") as report_file:
             report_file.write(html_content)
-        print(f"✅ Success! Report saved as: {os.path.abspath(filename)}")
-        return
+        print(f"Success! Report saved as: {report_path}")
+        return report_path
 
-    print(f"\n📄 Compiling and saving PDF report to {filename}...")
-    with open(filename, "w+b") as result_file:
+    print(f"\nCompiling and saving PDF report to {report_path.name}...")
+    with report_path.open("x+b") as result_file:
         pisa_status = pisa.CreatePDF(html_content, dest=result_file)
 
     if pisa_status.err:
-        print("❌ Error generating PDF.")
-    else:
-        print(f"✅ Success! Report saved as: {os.path.abspath(filename)}")
+        report_path.unlink(missing_ok=True)
+        raise RuntimeError("Error generating PDF report.")
+
+    print(f"Success! Report saved as: {report_path}")
+    return report_path
 
 
 def main():
@@ -208,30 +425,26 @@ def main():
     print("📝 ATTACK COMPLETE. GENERATING REPORT...")
     print("="*50)
     
-    # Compile all results for the reporter
-    logs_list = []
-    for idx, res in enumerate(all_results, 1):
-        round_log = (
-            f"=== ROUND {idx} ===\n"
-            f"--- EXECUTOR RAW TERMINAL LOGS ---\n"
-            f"{res['executor_raw']}\n\n"
-            f"--- ANALYZER OUTCOME CLASSIFICATIONS ---\n"
-            f"{res['analyzer_raw']}\n"
-        )
-        logs_list.append(round_log)
-    combined_raw_logs = "\n\n".join(logs_list)
-    
+    # Python owns the evidence section so long transcripts cannot be truncated,
+    # summarized, or hallucinated by a single reporter LLM completion.
+    transcripts, execution_summary, evidence_markers = build_report_evidence(all_results)
+
     coverage = planner_util.get_coverage_summary() if hasattr(planner_util, 'get_coverage_summary') else None
-    report_task = tasks.generate_pdf_report(reporter, raw_logs=combined_raw_logs, coverage_summary=coverage)
+    report_task = tasks.generate_pdf_report(
+        reporter,
+        coverage_summary=coverage,
+        execution_summary=execution_summary,
+    )
     report_crew = Crew(
         agents=[reporter],
         tasks=[report_task],
         process=Process.sequential
     )
     final_result = report_crew.kickoff()
-    
-    # The reporter emits Markdown, so the final step is PDF rendering.
-    save_report(final_result.raw)
+
+    complete_markdown = assemble_complete_report(final_result.raw, transcripts)
+    validate_complete_report(complete_markdown, evidence_markers)
+    save_report(complete_markdown)
 
 if __name__ == "__main__":
     main()

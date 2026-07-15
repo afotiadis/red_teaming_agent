@@ -46,10 +46,22 @@ $env:LLM_BACKEND="ariadne"
 
 The code selects the LLM implementation at runtime based on `LLM_BACKEND`. Ariadne's implementation is preserved in `src/ariadne_llm.py` but will not be used unless `LLM_BACKEND` is set to `ariadne`.
 
-### OpenRouter `gpt-oss-120b` (free) recommendations
+## Report Archive
 
-- Recommended model slug: `openai/gpt-oss-120b:free` (this is the default used by the code).
-- This model supports very large context windows (up to ~131k tokens) and configurable reasoning.
+Every completed run is saved under `reports/` with a unique target, UTC timestamp, and random suffix, for example:
+
+```text
+reports/red_team_report_zero_health_20260714T183012_123456Z_a1b2c3d4.pdf
+```
+
+Existing reports are never overwritten. Set `REPORT_OUTPUT_DIR` to use another directory; relative paths are resolved from the repository root. The same archive behavior applies to PDF, HTML, and JSON report formats.
+
+Report analysis and evidence are generated separately: the reporter LLM writes the concise executive, methodology, findings, and remediation sections, while Python renders every executor payload and target response deterministically. A completeness check verifies all evidence markers and required sections before a PDF can be archived.
+
+### OpenRouter free-model configuration
+
+- Stable free default: `openrouter/free`, which routes requests to a currently available free model.
+- You may still select a specific free model with `OPENROUTER_MODEL`, but availability can change over time.
 
 Add the following env vars to your `.env` or environment before running:
 
@@ -58,11 +70,14 @@ Add the following env vars to your `.env` or environment before running:
 OPENROUTER_API_KEY=sk-or-...
 LLM_BACKEND=openrouter
 
-# Optional but recommended for gpt-oss-120b
-OPENROUTER_MODEL=openai/gpt-oss-120b:free
+# Optional: pin a specific model; otherwise use the maintained free router
+OPENROUTER_MODEL=openrouter/free
 OPENROUTER_TEMPERATURE=0.7
 LLM_MAX_TOKENS=8192
 OPENROUTER_TIMEOUT=120
+OPENROUTER_MAX_RETRIES=2
+OPENROUTER_RETRY_BACKOFF=2
+OPENROUTER_FALLBACK_MODELS=openrouter/free
 
 # Reasoning controls (enable if you want chain-of-thought / internal reasoning)
 OPENROUTER_REASONING_ENABLED=true
@@ -76,7 +91,9 @@ OPENROUTER_X_TITLE=MyRedTeamTool
 
 Notes:
 - If you enable `OPENROUTER_REASONING_ENABLED`, the wrapper will request reasoning tokens and the model may spend more internal compute before producing the final answer. This can increase latency but improve problem-solving for hard puzzles.
-- `LLM_MAX_TOKENS` should be set according to the task; `gpt-oss-120b` supports very long outputs but this increases runtime and memory usage on the provider side.
+- `LLM_MAX_TOKENS` should be set according to the task; larger outputs increase runtime and provider load.
+- `OPENROUTER_MAX_RETRIES` controls bounded retries for transient HTTP failures, invalid JSON, and successful responses whose assistant content is unexpectedly null or empty.
+- `OPENROUTER_FALLBACK_MODELS` is a comma-separated client-side failover chain. It is also used for HTTP 200 responses with null content, a case OpenRouter's normal server-side error fallback does not catch.
 - Streaming (`stream: true`) is supported by OpenRouter; for interactive streaming reliably consider using the official OpenRouter SDK. The lightweight wrapper included in `src/openrouter_llm.py` is focused on synchronous calls.
 
 ## Switching Targets
@@ -99,3 +116,5 @@ Notes:
 - The default request body field is `message`, which matches the Zero-Health `/api/chatbot/chat` contract.
 - If you want to probe the injection-friendly endpoint instead, point `TARGET_CHAT_URL` at `/api/chatbot/enhanced-chat` or set `TARGET_ENHANCED_CHAT_URL` and use it in a custom run.
 - The current code sends the auth token automatically in `Authorization: Bearer ...` for the Zero-Health profile.
+- When `ATTACK_STRATEGY` is unset, this target automatically uses the `zero_health` pacing profile: a 60-second read timeout, one 90-second retry for non-action prompts, and recovery cooldowns after consecutive timeouts.
+- Timed-out prompts that may change state (for example scheduling, cancelling, emailing, or exporting) are not retried by default because the original request may still complete server-side. Set `ATTACK_RETRY_ACTION_PROMPTS=true` only against a disposable target where duplicate actions are acceptable.
