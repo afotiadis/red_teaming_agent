@@ -52,11 +52,17 @@ def get_target_chat_url() -> str:
     return _strip_trailing_slash(os.getenv("TARGET_CHAT_URL", profile["chat_url"]))
 
 
+#altered code - codex suggestion
 def get_target_health_url() -> str:
+    configured_url = os.getenv("TARGET_HEALTH_URL")
+    if configured_url:
+        return _strip_trailing_slash(configured_url)
+
     profile = get_target_profile()
     default_url = profile.get("health_url")
     if default_url:
-        return _strip_trailing_slash(os.getenv("TARGET_HEALTH_URL", default_url))
+        return _strip_trailing_slash(default_url)
+
     chat_url = get_target_chat_url()
     if chat_url.endswith("/chat"):
         return f"{chat_url[:-5]}/health"
