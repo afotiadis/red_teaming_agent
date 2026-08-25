@@ -1,6 +1,6 @@
 {
-  "prompt_injection": "in_progress",
+  "prompt_injection": "vulnerable",
   "jailbreak": "in_progress",
-  "info_disclosure": "in_progress",
+  "info_disclosure": "vulnerable",
   "excessive_agency": "in_progress"
 }

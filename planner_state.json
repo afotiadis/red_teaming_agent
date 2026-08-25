@@ -101,6 +101,18 @@
       "status": "completed",
       "latency": 3503.7494575977325,
       "raw": "Multi-turn completed."
+    },
+    {
+      "prompt": "[captured via plan_attack]",
+      "status": "completed",
+      "latency": 2277.6718802452087,
+      "raw": "Multi-turn completed."
+    },
+    {
+      "prompt": "[captured via plan_attack]",
+      "status": "completed",
+      "latency": 1638.3406329154968,
+      "raw": "Multi-turn completed."
     }
   ]
 }
