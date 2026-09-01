@@ -98,23 +98,41 @@ Notes:
 
 ## Switching Targets
 
-Use `TARGET_APP` to switch the workflow from the generic chatbot path to Zero-Health without editing code.
+Set `TARGET_APP` to select one of the four validation applications. The profile supplies the correct chat URL, health URL, JSON request field, authentication mode, and pacing strategy. Because all four repositories default to port 5000, run only the selected application or map it to another port.
 
-### Zero-Health profile
+| `TARGET_APP` | Default chat endpoint | Payload | Authentication |
+|---|---|---|---|
+| `zero_health` | `http://localhost:5000/api/chatbot/chat` | `{"message": ...}` | Bearer JWT required |
+| `dvaia` | `http://localhost:5000/api/agent/chat` | `{"prompt": ...}` | None |
+| `vuln_bank` | `http://localhost:5000/api/ai/chat` | `{"message": ...}` | Bearer JWT required |
+| `vulnerable_chat` | `http://localhost:5000/api/chat` | `{"message": ...}` | None |
+
+The normal PowerShell setup is therefore only:
 
 ```powershell
 $env:TARGET_APP="zero_health"
 $env:TARGET_AUTH_TOKEN="<your-zero-health-jwt>"
-$env:TARGET_CHAT_URL="http://localhost:5000/api/chatbot/chat"
-$env:TARGET_HEALTH_URL="http://localhost:5000/api/health"
-$env:TARGET_HISTORY_URL="http://localhost:5000/api/chatbot/history"
-$env:TARGET_ENHANCED_CHAT_URL="http://localhost:5000/api/chatbot/enhanced-chat"
+python main.py
 ```
 
-Notes:
-- Zero-Health uses bearer auth, so the chatbot requests must include a valid JWT in `TARGET_AUTH_TOKEN`.
-- The default request body field is `message`, which matches the Zero-Health `/api/chatbot/chat` contract.
-- If you want to probe the injection-friendly endpoint instead, point `TARGET_CHAT_URL` at `/api/chatbot/enhanced-chat` or set `TARGET_ENHANCED_CHAT_URL` and use it in a custom run.
-- The current code sends the auth token automatically in `Authorization: Bearer ...` for the Zero-Health profile.
-- When `ATTACK_STRATEGY` is unset, this target automatically uses the `zero_health` pacing profile: a 60-second read timeout, one 90-second retry for non-action prompts, and recovery cooldowns after consecutive timeouts.
-- Timed-out prompts that may change state (for example scheduling, cancelling, emailing, or exporting) are not retried by default because the original request may still complete server-side. Set `ATTACK_RETRY_ACTION_PROMPTS=true` only against a disposable target where duplicate actions are acceptable.
+Equivalent selections for the other targets are:
+
+```powershell
+# DVAIA's agentic ReAct endpoint
+$env:TARGET_APP="dvaia"
+
+# Vuln-Bank's authenticated, account-context AI endpoint
+$env:TARGET_APP="vuln_bank"
+$env:TARGET_AUTH_TOKEN="<your-vuln-bank-jwt>"
+
+# Vulnerable Chat's unauthenticated endpoint
+$env:TARGET_APP="vulnerable_chat"
+```
+
+Use `TARGET_BASE_URL` if a selected app is mapped to a different host or port; for example, `$env:TARGET_BASE_URL="http://localhost:5100"`. Use `TARGET_CHAT_URL` and `TARGET_HEALTH_URL` only when overriding complete endpoint URLs. These specific variables take precedence over the profile, so remove stale values from `.env` when you want `TARGET_APP` to control selection by itself.
+
+The profile also supplies the planner's target description. `--target` or `TARGET_PROMPT` can still override it when you want to focus a run on particular risks.
+
+For alternate routes, set `TARGET_CHAT_URL` explicitly. Useful examples are DVAIA's simpler `/api/chat`, Zero-Health's `/api/chatbot/enhanced-chat`, and the bundled generic FastAPI target at `TARGET_APP=generic`. To use Vuln-Bank's anonymous `/api/ai/chat/anonymous` route without a JWT, also set `TARGET_AUTH_MODE=none` and `TARGET_AUTH_REQUIRED=false`.
+
+Timed-out prompts that may change state (for example scheduling, cancelling, emailing, or exporting) are not retried by default because the original request may still complete server-side. Set `ATTACK_RETRY_ACTION_PROMPTS=true` only against a disposable target where duplicate actions are acceptable.

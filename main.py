@@ -27,7 +27,15 @@ load_dotenv()
 from crewai import Crew, Process
 from src.agents import RedTeamingAgents
 from src.tasks import RedTeamingTasks
-from src.target_profiles import get_target_health_url, get_target_chat_url, get_target_auth_token, get_target_app
+from src.target_profiles import (
+    build_target_headers,
+    get_target_health_url,
+    get_target_chat_url,
+    get_target_auth_token,
+    get_target_app,
+    get_target_description,
+    target_auth_is_required,
+)
 
 TARGET_CHAT_URL = get_target_chat_url()
 TARGET_HEALTH_URL = get_target_health_url()
@@ -74,20 +82,20 @@ def validate_runtime() -> None:
             missing.append("OPENROUTER_API_KEY")
 
     target_auth = get_target_auth_token()
-    if os.getenv("TARGET_APP", "generic").strip().lower() == "zero_health" and not target_auth:
-        missing.append("TARGET_AUTH_TOKEN (or ZERO_HEALTH_JWT)")
+    if target_auth_is_required() and not target_auth:
+        missing.append("TARGET_AUTH_TOKEN")
 
     if missing:
         raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
 
     health_url = TARGET_HEALTH_URL
     try:
-        response = requests.get(health_url, timeout=5)
+        response = requests.get(health_url, headers=build_target_headers(), timeout=5)
         response.raise_for_status()
     except requests.RequestException as exc:
         raise RuntimeError(
             f"Target chatbot is not reachable at {TARGET_CHAT_URL} (health check: {health_url}). "
-            "Start target_app/vulnerable_chatbot.py first."
+            f"Start the selected '{get_target_app()}' application and verify its profile/URL settings."
         ) from exc
 
 def _render_report_html(markdown_content: str) -> str:
@@ -380,7 +388,7 @@ def main():
     parser.add_argument("--target", dest="target_prompt", help="Target description for the planner")
     args = parser.parse_args()
 
-    target_prompt = args.target_prompt or os.getenv("TARGET_PROMPT")
+    target_prompt = args.target_prompt or os.getenv("TARGET_PROMPT") or get_target_description()
     if not target_prompt:
         if sys.stdin.isatty():
             target_prompt = input("Describe the target you want to attack (e.g., 'A local python codebase in ./target_app using Ollama'):\n> ")

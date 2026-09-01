@@ -40,6 +40,8 @@ from src.target_profiles import (
     get_target_request_format,
     get_target_auth_mode,
     get_target_auth_token,
+    get_target_attack_strategy,
+    get_target_base_url,
 )
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -81,7 +83,7 @@ DEFAULT_ATTACK_STRATEGY = {
 
 def _load_attack_strategy() -> dict:
     """Load the selected attack pacing profile from disk, with env defaults."""
-    default_strategy_name = "zero_health" if TARGET_APP == "zero_health" else "local_fast"
+    default_strategy_name = get_target_attack_strategy()
     strategy_name = os.getenv("ATTACK_STRATEGY", default_strategy_name)
     try:
         with open(ATTACK_STRATEGIES_PATH, "r", encoding="utf-8") as strategy_file:
@@ -626,9 +628,10 @@ def infer_target_schema(target_url: str = "", field_names: str = "message,query,
 
 
 @tool("analyze_target_behavior")
-def analyze_target_behavior(target_url: str = "", test_prompts: str = "hello|help|test|who are you|what can you do", field_name: str = "message") -> str:
+def analyze_target_behavior(target_url: str = "", test_prompts: str = "hello|help|test|who are you|what can you do", field_name: str = "") -> str:
     """Send benign prompts to characterize response shape, timing, and output style."""
     target_url = (target_url or TARGET_CHAT_URL).rstrip("/")
+    field_name = field_name.strip() or TARGET_REQUEST_FIELD
     prompts = [prompt.strip() for prompt in test_prompts.split("|") if prompt.strip()]
     report = [f"## Target Behavior Analysis\n", f"**Target URL:** {target_url}\n", f"**Field Name:** {field_name}\n"]
     headers = _target_headers()
@@ -670,7 +673,7 @@ def analyze_target_behavior(target_url: str = "", test_prompts: str = "hello|hel
 def scan_target_misconfigurations(target_url: str = "") -> str:
     """Non-destructively check for obvious security misconfigurations."""
     target_url = (target_url or TARGET_CHAT_URL).rstrip("/")
-    base_url = target_url.rsplit("/", 1)[0] if "/" in target_url else target_url
+    base_url = get_target_base_url() if target_url == TARGET_CHAT_URL else target_url.rsplit("/", 1)[0]
     findings = [f"## Misconfiguration Scan\n", f"**Target:** {base_url}\n"]
     headers = _target_headers({"Origin": "https://attacker.example.com"})
 
