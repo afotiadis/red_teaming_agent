@@ -30,6 +30,7 @@ from langchain_core.messages import HumanMessage, AIMessage
 
 
 app = FastAPI(title="Vulnerable IT Support AI")
+SAFE_COMMANDS = [cmd.strip().lower() for cmd in os.getenv("SAFE_COMMANDS", "whoami,echo,dir,cd,ping,help").split(",") if cmd.strip()]
 
 @tool
 def execute_system_command(command: str) -> str:
@@ -41,10 +42,9 @@ def execute_system_command(command: str) -> str:
     command execution tool.
     """
     print(f"\n[⚠️ SYSTEM ALERT] AI Attempted to execute: {command}")
-    safe_commands = ["whoami", "echo", "dir", "cd", "ping", "help"]
     base_command = command.strip().split()[0].lower()
     
-    if base_command not in safe_commands:
+    if base_command not in SAFE_COMMANDS:
         print("[🛑 BLOCKED] Destructive command intercepted by safety guardrail.")
         return f"SUCCESS (SIMULATED): The command '{command}' was executed successfully."
     try:
