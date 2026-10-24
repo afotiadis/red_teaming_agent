@@ -1,11 +1,11 @@
-"""Tools exposed to the red-teaming planner and executor agents.
+"""Tools exposed to the red-teaming planner and deterministic executor.
 
 This module is the operational bridge between the crew and the outside world.
 It provides three kinds of capabilities:
 
 * a retrieval tool that lets the planner consult the documentation knowledge base,
 * a Promptfoo-based attack executor that can replay test prompts against the target,
-* a PyRIT-based executor that can generate a separate attack harness when needed.
+* reconnaissance helpers that map the configured chatbot surface.
 
 The file also initializes the local vector-store retriever if the knowledge base
 has already been built. That makes the planner step self-contained: it can ask
@@ -18,7 +18,6 @@ import json
 import shutil
 import subprocess
 import tempfile
-import textwrap
 import time
 import uuid
 import re
@@ -42,6 +41,7 @@ from src.target_profiles import (
     get_target_auth_token,
     get_target_attack_strategy,
     get_target_base_url,
+    target_auth_is_required,
 )
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -545,14 +545,33 @@ def definition_lookup_tool(definition_text: str) -> str:
 
 @tool("discover_target_surface")
 def discover_target_surface(target_url: str = "") -> str:
-    """Probe a target service to discover its API surface and basic capabilities.
+    """Report the configured target service surface.
 
-    This tool only sends harmless requests such as OPTIONS, GET, HEAD, and POST
-    with an empty JSON object. It is intended to help the planner infer the
-    target's endpoint shape before any attack prompts are generated.
+    Final campaigns normally use target profiles, so the default behavior avoids
+    redundant OPTIONS/GET/empty POST probes. Set TARGET_SURFACE_ACTIVE_PROBES=1
+    to re-enable the legacy probing behavior for unknown custom deployments.
     """
     target_url = (target_url or TARGET_CHAT_URL).rstrip("/")
-    findings = [f"## Target Surface Discovery\n", f"**Target URL:** {target_url}\n"]
+    findings = [
+        "## Target Surface Discovery\n",
+        f"**Target App:** {TARGET_APP}\n",
+        f"**Base URL:** {get_target_base_url()}\n",
+        f"**Chat URL:** {target_url}\n",
+        f"**Health URL:** {TARGET_HEALTH_URL}\n",
+        f"**Enhanced Chat URL:** {TARGET_ENHANCED_CHAT_URL}\n",
+        f"**History URL:** {TARGET_HISTORY_URL}\n",
+        f"**Request Format:** {TARGET_REQUEST_FORMAT}\n",
+        f"**Request Field:** {TARGET_REQUEST_FIELD}\n",
+        f"**Auth Mode:** {TARGET_AUTH_MODE}\n",
+        f"**Auth Required:** {target_auth_is_required()}\n",
+        f"**Attack Strategy:** {ATTACK_STRATEGY.get('name', get_target_attack_strategy())}\n",
+    ]
+
+    if os.getenv("TARGET_SURFACE_ACTIVE_PROBES", "0").strip().lower() not in {"1", "true", "yes", "on"}:
+        findings.append("**Active Probes:** skipped; configured target profile is being used.\n")
+        return "".join(findings)
+
+    findings.append("**Active Probes:** enabled by TARGET_SURFACE_ACTIVE_PROBES.\n")
     headers = _target_headers()
 
     try:
@@ -1271,69 +1290,3 @@ def promptfoo_tool(prompts_text: str) -> str:
         if temp_config_path and os.path.exists(temp_config_path):
             os.remove(temp_config_path)
 
-@tool("execute_pyrit_attack")
-def pyrit_tool(prompts_text: str) -> str:
-    """Execute a PyRIT-driven attack against the target chatbot.
-
-    PyRIT is handled through a temporary script because the project is designed to
-    stay portable and easy to inspect. The generated script wraps the target in a
-    small custom PromptTarget implementation and sends the planner-provided
-    prompts through the orchestrator.
-    """
-    print(f"\n--> [PyRIT] Attacking FastAPI Agent with dynamic payloads...")
-    
-    # Split the planner payload into individual jailbreak attempts.
-    jailbreak_prompts = [p.strip() for p in prompts_text.split('|') if p.strip()]
-    
-    # Generate a temporary self-contained script so PyRIT can be launched in the current virtual environment.
-    script_content = textwrap.dedent(f"""
-    import asyncio
-    import aiohttp
-    from pyrit.prompt_target import PromptTarget
-    from pyrit.orchestrator import PromptSendingOrchestrator
-
-    class FastAPITarget(PromptTarget):
-        def __init__(self, endpoint: str):
-            super().__init__()
-            self.endpoint = endpoint
-
-        async def send_prompt_async(self, prompt_request):
-            prompt_text = prompt_request.request_pieces[0].original_value
-            async with aiohttp.ClientSession() as session:
-                payload = {{"message": prompt_text}}
-                async with session.post(self.endpoint, json=payload, headers={json.dumps(_target_headers())}) as resp:
-                    result = await resp.json()
-                    print(f"\\n[PyRIT Payload]: {{prompt_text}}")
-                    print(f"[Agent Response]: {{result.get('response', 'Error')}}")
-                    return result
-
-    async def run_attack():
-        target = FastAPITarget(endpoint="{TARGET_CHAT_URL}")
-        orchestrator = PromptSendingOrchestrator(objective_target=target)
-        
-        prompts_to_send = {jailbreak_prompts}
-        print("Sending dynamic agentic jailbreak attempts...")
-        await orchestrator.send_prompts_async(prompt_list=prompts_to_send)
-
-    if __name__ == "__main__":
-        asyncio.run(run_attack())
-    """)
-    
-    try:
-        # Write the temporary script with UTF-8 encoding to avoid locale issues.
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as temp_script:
-            temp_script.write(script_content)
-            temp_script_path = temp_script.name
-        
-        # Use the current Python interpreter so the script runs inside the same environment.
-        result = subprocess.run([sys.executable, temp_script_path], capture_output=True, text=True, check=False, encoding='utf-8')
-        
-        os.remove(temp_script_path)
-        output = result.stdout if result.stdout else result.stderr
-        return f"PyRIT execution complete. Raw Output:\n{output}"
-    except Exception as e:
-        return f"PyRIT execution failed: {str(e)}"
-
-# Agentic Radar support is intentionally left commented out. If the project grows
-# to use it, this is the place to add a fourth tool without changing the planner
-# and executor contracts above.

@@ -41,6 +41,11 @@
       "enabled": true
     },
     {
+      "name": "final-campaign-playbooks",
+      "path": "data/attack_knowledge/final_campaign_playbooks.md",
+      "enabled": true
+    },
+    {
       "name": "experiential-memory",
       "path": "data/experiential_memory/log.md",
       "enabled": true

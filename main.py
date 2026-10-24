@@ -160,6 +160,8 @@ def build_report_evidence(all_results: list) -> tuple[str, dict, list[str]]:
     status_counts: dict[str, int] = {}
     outcome_counts: dict[str, int] = {}
     category_counts: dict[str, int] = {}
+    objective_counts: dict[str, int] = {}
+    evidence_marker_counts: dict[str, int] = {}
     error_type_counts: dict[str, int] = {}
     representative_errors = []
     targets = set()
@@ -168,8 +170,9 @@ def build_report_evidence(all_results: list) -> tuple[str, dict, list[str]]:
     for round_number, round_data in enumerate(all_results, 1):
         executor_raw = str(round_data.get("executor_raw", ""))
         analyzer_raw = str(round_data.get("analyzer_raw", ""))
+        feedback_summary = round_data.get("feedback_summary")
         executor_payload = _extract_json_dict(executor_raw, required_key="results")
-        analyzer_payload = _extract_json_dict(analyzer_raw, required_key="results")
+        analyzer_payload = feedback_summary if isinstance(feedback_summary, dict) else _extract_json_dict(analyzer_raw, required_key="results")
         executor_results = executor_payload.get("results", []) if executor_payload else []
         analyzer_results = analyzer_payload.get("results", []) if analyzer_payload else []
 
@@ -238,9 +241,14 @@ def build_report_evidence(all_results: list) -> tuple[str, dict, list[str]]:
             if isinstance(analyzer_item, dict):
                 outcome = str(analyzer_item.get("outcome", "UNKNOWN"))
                 category = str(analyzer_item.get("category", "unknown"))
+                objective = str(analyzer_item.get("objective", "unknown"))
                 outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
                 category_counts[category] = category_counts.get(category, 0) + 1
-                transcript_parts.append(f"**Analyzer Classification:** `{outcome}` (`{category}`)")
+                objective_counts[objective] = objective_counts.get(objective, 0) + 1
+                for evidence_marker in analyzer_item.get("evidence_markers", []) or []:
+                    marker_key = str(evidence_marker)
+                    evidence_marker_counts[marker_key] = evidence_marker_counts.get(marker_key, 0) + 1
+                transcript_parts.append(f"**Analyzer Classification:** `{outcome}` (`{category}`, `{objective}`)")
 
     summary = {
         "targets": sorted(targets),
@@ -249,6 +257,8 @@ def build_report_evidence(all_results: list) -> tuple[str, dict, list[str]]:
         "http_status_counts": status_counts,
         "analyzer_outcome_counts": outcome_counts,
         "category_counts": category_counts,
+        "objective_counts": objective_counts,
+        "evidence_marker_counts": evidence_marker_counts,
         "transport_error_counts": error_type_counts,
         "representative_errors": representative_errors,
     }
@@ -380,7 +390,7 @@ def main():
 
     The function intentionally follows the same order a human would use to reason
     about the system: capture the target, validate the environment, create the
-    planner/executor/reporter roles, execute the crew, and export the result.
+    planner/analyzer/reporter roles, execute the planned prompts, and export the result.
     """
     
     print("🛡️ Welcome to the CrewAI Red Teaming Agent 🛡️")
@@ -400,14 +410,11 @@ def main():
     agents = RedTeamingAgents()
     tasks = RedTeamingTasks()
 
-    # The crew is split into distinct roles so each stage has one responsibility.
-    planner = agents.planner_agent()
-    executor = agents.executor_agent()
     reporter = agents.reporter_agent()
 
-    # Adaptive planner instance for generating dynamic prompts, seeded with the original target description
+    # The adaptive planner owns campaign state and objective coverage. The
+    # CrewAI planner inside run_attack_loop owns each round's prompt batch.
     planner_util = agents.adaptive_planner(base_prompt=target_prompt)
-    print(f"[Adaptive Planner] Next prompt preview: {planner_util.next_prompt()}", flush=True)
     from src.feedback_loop import run_attack_loop
 
     print("\n🚀 Initiating Multi-Turn Attack Sequence...\n")
